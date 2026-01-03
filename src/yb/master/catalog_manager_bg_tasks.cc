@@ -34,10 +34,13 @@
 #include <memory>
 
 #include "yb/master/catalog_manager_util.h"
+#include "yb/gutil/sysinfo.h"
+
 #include "yb/master/cdcsdk_manager.h"
 #include "yb/master/clone/clone_state_manager.h"
 #include "yb/master/cluster_balance.h"
 #include "yb/master/master.h"
+#include "yb/master/master_admin.pb.h"
 #include "yb/master/tablet_split_manager.h"
 #include "yb/master/ts_manager.h"
 #include "yb/master/xcluster/xcluster_manager_if.h"
@@ -49,10 +52,12 @@
 #include "yb/util/callsite_profiling.h"
 #include "yb/util/debug/long_operation_tracker.h"
 #include "yb/util/debug-util.h"
+#include "yb/util/flags.h"
 #include "yb/util/monotime.h"
 #include "yb/util/mutex.h"
 #include "yb/util/status_log.h"
 #include "yb/util/thread.h"
+#include "yb/util/tsan_util.h"
 
 using namespace std::literals;
 
@@ -65,6 +70,10 @@ METRIC_DEFINE_event_stats(
 
 DEFINE_RUNTIME_int32(catalog_manager_bg_task_wait_ms, 1000,
     "Amount of time the catalog manager background task thread waits between runs");
+
+DEFINE_RUNTIME_int32(transaction_status_check_interval_sec, 60,
+    "Interval in seconds for checking transaction status table partitions/tablets count.");
+TAG_FLAG(transaction_status_check_interval_sec, advanced);
 
 DEFINE_RUNTIME_int32(load_balancer_initial_delay_secs, yb::master::kDelayAfterFailoverSecs,
              "Amount of time to wait between becoming master leader and enabling the load "
@@ -84,8 +93,13 @@ DEFINE_test_flag(bool, pause_catalog_manager_bg_loop_start, false,
 DEFINE_test_flag(bool, pause_catalog_manager_bg_loop_end, false,
                  "Pause the bg tasks thread at the end of the loop.");
 
+DEFINE_test_flag(int32, transaction_status_check_run_count, 0,
+    "Test-only counter to track the transaction status check runs.");
+
 DECLARE_bool(enable_ysql);
 DECLARE_bool(TEST_echo_service_enabled);
+DECLARE_int32(transaction_table_num_tablets_per_tserver);
+DECLARE_int32(transaction_table_num_tablets);
 
 namespace yb::master {
 
@@ -97,7 +111,9 @@ CatalogManagerBgTasks::CatalogManagerBgTasks(Master* master)
       master_(master),
       catalog_manager_(master->catalog_manager_impl()),
       cluster_balancer_duration_(METRIC_load_balancer_duration.Instantiate(
-          master_->metric_entity())) {
+          master_->metric_entity())),
+      last_transaction_status_check_time_(MonoTime::kUninitialized),
+      last_live_tservers_(0) {
 }
 
 void CatalogManagerBgTasks::Wake() {
@@ -286,6 +302,9 @@ void CatalogManagerBgTasks::RunOnceAsLeader(const LeaderEpoch& epoch) {
 
   // Abort inactive YSQL BackendsCatalogVersionJob jobs.
   master_->ysql_backends_manager()->AbortInactiveJobs();
+
+  // Check transaction status table partitions/tablets count periodically.
+  CheckTransactionStatusTable(epoch);
 }
 
 void CatalogManagerBgTasks::MaybeRunClusterBalancer(
@@ -331,6 +350,106 @@ void CatalogManagerBgTasks::Run() {
     Wait(FLAGS_catalog_manager_bg_task_wait_ms);
   }
   VLOG(1) << "Catalog manager background task thread shutting down";
+}
+
+void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch) {
+  auto interval_sec = GetAtomicFlag(&FLAGS_transaction_status_check_interval_sec);
+  if (interval_sec <= 0) {
+    return;  // Check is disabled
+  }
+
+  auto now = MonoTime::Now();
+  if (last_transaction_status_check_time_.Initialized()) {
+    auto elapsed = now.GetDeltaSince(last_transaction_status_check_time_);
+    if (elapsed.ToSeconds() < interval_sec) {
+      return;  // Not time yet
+    }
+  }
+
+  last_transaction_status_check_time_ = now;
+
+  // Get number of live tservers
+  size_t num_live_tservers = master_->ts_manager()->NumLiveDescriptors();
+
+  if (last_live_tservers_ == num_live_tservers) {
+    return;  // No change in number of live tservers, nothing to do
+  }
+
+  // tmp log
+  LOG(INFO) << "INFO_A: Number of live tservers changed from " << last_live_tservers_
+    << " to " << num_live_tservers;
+
+  auto global_txn_table_result = catalog_manager_->GetGlobalTransactionStatusTable();
+  if (!global_txn_table_result.ok()) {
+    LOG(WARNING) << "Failed to get global transaction status table: "
+                 << global_txn_table_result.status().ToString();
+    return;
+  }
+
+  auto global_txn_table = *global_txn_table_result;
+  if (!global_txn_table) {
+    LOG(WARNING) << "Global transaction status table not found";
+    return;
+  }
+
+  // Get actual number of tablets
+  size_t num_tablets = global_txn_table->TabletCount();
+  size_t num_tablets_per_tserver = num_tablets / num_live_tservers;
+
+  // Calculate expected number of tablets
+  int flag_num_tablets = GetAtomicFlag(&FLAGS_transaction_table_num_tablets);
+  int flag_num_tablets_per_tserver
+    = GetAtomicFlag(&FLAGS_transaction_table_num_tablets_per_tserver);
+  size_t expected_tablets = (flag_num_tablets > 0) ? flag_num_tablets
+                              : (num_live_tservers * flag_num_tablets_per_tserver);
+  // ignore boot time setting - going away soon
+  int boot_time_shards_per_tserver = 8;
+  if (IsTsan()) {
+    boot_time_shards_per_tserver = 2;
+  } else if (base::NumCPUs() <= 2) {
+    boot_time_shards_per_tserver = 4;
+  }
+
+  // Check if they match
+  bool tablets_match = (num_tablets >= expected_tablets);
+
+  LOG(INFO) << "INFO_A: Transaction status table check: "
+            << (tablets_match ? "MATCH" : "MISMATCH")
+            << ", tablets=" << num_tablets
+            << ", expected=" << expected_tablets
+            << " (flag_num_tablets=" << flag_num_tablets
+            << " or (num_tservers=" << num_live_tservers
+            << " * tablets_per_tserver=" << flag_num_tablets_per_tserver << "))"
+            << ", boot_time_shards_per_tserver=" << boot_time_shards_per_tserver
+            << ", num_tablets_per_tserver=" << num_tablets_per_tserver;
+
+  // Increment test counter to track that the task ran.
+  if (FLAGS_TEST_transaction_status_check_run_count >= 0) {
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_transaction_status_check_run_count)++;
+  }
+
+  if (!tablets_match) {
+    size_t tablets_to_add = expected_tablets - num_tablets;
+    // Add tablets to the transaction status table.
+    for (size_t i = 1; i <= tablets_to_add; i++) {
+      AddTransactionStatusTabletRequestPB req;
+      AddTransactionStatusTabletResponsePB resp;
+      req.set_table_id(global_txn_table->id());
+      Status s = catalog_manager_->AddTransactionStatusTablet(&req, &resp, nullptr, epoch);
+      WARN_NOT_OK(s, "Transaction status table check: Failed to add tablet to "
+          "transaction status table");
+      if (!s.ok()) {
+        // tmp log
+        LOG(INFO) << "INFO_A: Transaction status table check: Failed to add "
+                     "tablet " << i << " to transaction status table: " << s.ToString();
+        return;  // Stop trying if we hit an error
+      }
+      LOG(INFO) << "INFO_A: Transaction status table check: Added " << i
+                << "tablet(s) to transaction status table";
+    }
+  }
+
+  last_live_tservers_ = num_live_tservers;
 }
 
 } // namespace yb::master

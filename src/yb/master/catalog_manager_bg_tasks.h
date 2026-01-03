@@ -75,6 +75,8 @@ class CatalogManagerBgTasks final {
       const LeaderEpoch& epoch, const std::vector<TableInfoPtr>& tables,
       const TabletInfoMap& tablets);
 
+  void CheckTransactionStatusTable(const LeaderEpoch& epoch);
+
   std::atomic<bool> closing_;
   bool pending_updates_;
   mutable Mutex lock_;
@@ -84,6 +86,8 @@ class CatalogManagerBgTasks final {
   CatalogManager* catalog_manager_;
   bool was_leader_ = false;
   scoped_refptr<EventStats> cluster_balancer_duration_;
+  MonoTime last_transaction_status_check_time_;
+  size_t last_live_tservers_;
 };
 
 }  // namespace master

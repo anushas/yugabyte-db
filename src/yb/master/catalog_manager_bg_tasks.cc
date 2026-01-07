@@ -71,7 +71,7 @@ METRIC_DEFINE_event_stats(
 DEFINE_RUNTIME_int32(catalog_manager_bg_task_wait_ms, 1000,
     "Amount of time the catalog manager background task thread waits between runs");
 
-DEFINE_RUNTIME_int32(transaction_status_check_interval_sec, 60,
+DEFINE_RUNTIME_int32(transaction_status_check_interval_sec, 15*60,
     "Interval in seconds for checking transaction status table partitions/tablets count.");
 TAG_FLAG(transaction_status_check_interval_sec, advanced);
 

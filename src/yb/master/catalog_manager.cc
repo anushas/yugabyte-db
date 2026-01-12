@@ -5119,7 +5119,7 @@ Status CatalogManager::CreateTransactionStatusTableInternal(
     const LeaderEpoch& epoch,
     const ReplicationInfoPB* replication_info) {
   if (VERIFY_RESULT(TableExists(kSystemNamespaceName, table_name))) {
-    if (table_name == kGlobalTransactionsTableName) {
+    if (table_name == kGlobalTransactionsTableName || table_name.starts_with(kTransactionTablePrefix)) {
       LOG(INFO) << "INFO_A: Not Creating existing transaction status table: "
         << table_name << "\n" << GetStackTrace();
     }
@@ -5152,6 +5152,21 @@ Status CatalogManager::CreateTransactionStatusTableInternal(
     num_tablets = narrow_cast<int>(GetNumLiveTServersForPlacement(placement_uuid) *
                                    FLAGS_transaction_table_num_tablets_per_tserver);
   }
+
+  // When the local transaction status table is created, the number
+  // of tables should be set based on the number of live tservers
+  // in the placement info.
+  if ((tablespace_id) || (replication_info)) {
+    // Get the placement info from the tablespace or replication info.
+    const ReplicationInfoPB& placement_info = VERIFY_RESULT(
+    GetTableReplicationInfo(req.replication_info(), req.tablespace_id()));
+    auto live_tservers = VERIFY_RESULT(
+      FindTServersForPlacementInfo(placement_info.live_replicas(),
+       GetAllLiveNotBlacklistedTServers()));
+    LOG(INFO) << "INFO_A: live_tservers: " << live_tservers.size();
+    num_tablets = narrow_cast<int>(live_tservers.size() * FLAGS_transaction_table_num_tablets_per_tserver);
+  }
+
   req.mutable_schema()->mutable_table_properties()->set_num_tablets(num_tablets);
 
   ColumnSchema hash(kRedisKeyColumnName, DataType::BINARY, ColumnKind::HASH);

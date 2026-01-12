@@ -76,6 +76,8 @@ class CatalogManagerBgTasks final {
       const TabletInfoMap& tablets);
 
   void CheckTransactionStatusTable(const LeaderEpoch& epoch);
+  void CheckLocalTransactionStatusTables(const LeaderEpoch& epoch,
+      const TableId& global_txn_table_id);
 
   std::atomic<bool> closing_;
   bool pending_updates_;

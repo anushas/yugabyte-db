@@ -817,17 +817,8 @@ void InitMasterFlags() {
       kAutoDetectNumShardsPerTServer) {
     const auto value = GetTransactionTableNumShardsPerTServer();
     VLOG(1) << "Auto setting FLAGS_transaction_table_num_tablets_per_tserver to " << value;
-    // tmp log
-    LOG(INFO) << "INFO_A: Auto setting FLAGS_transaction_table_num_tablets_per_tserver to "
-      << value << "\n" << GetStackTrace();
     CHECK_OK(SET_FLAG_DEFAULT_AND_CURRENT(
       transaction_table_num_tablets_per_tserver, value));
-  } else {
-    // tmp log
-    int set_value = GetAtomicFlag(&FLAGS_transaction_table_num_tablets_per_tserver);
-    const auto calculated_value = GetTransactionTableNumShardsPerTServer();
-    LOG(INFO) << "INFO_A: FLAGS_transaction_table_num_tablets_per_tserver to "
-      << set_value << " and calculated value is " << calculated_value << "\n" << GetStackTrace();
   }
 }
 
@@ -5119,14 +5110,10 @@ Status CatalogManager::CreateTransactionStatusTableInternal(
     const LeaderEpoch& epoch,
     const ReplicationInfoPB* replication_info) {
   if (VERIFY_RESULT(TableExists(kSystemNamespaceName, table_name))) {
-    if (table_name == kGlobalTransactionsTableName || table_name.starts_with(kTransactionTablePrefix)) {
-      LOG(INFO) << "INFO_A: Not Creating existing transaction status table: "
-        << table_name << "\n" << GetStackTrace();
-    }
     return STATUS_SUBSTITUTE(AlreadyPresent, "Table already exists: $0", table_name);
   }
 
-  LOG(INFO) << "INFO_A: Creating transaction status table: "
+  LOG(INFO) << "Creating transaction status table: "
     << table_name << "\n" << GetStackTrace();
   // Set up a CreateTable request internally.
   CreateTableRequestPB req;
@@ -5163,8 +5150,8 @@ Status CatalogManager::CreateTransactionStatusTableInternal(
     auto live_tservers = VERIFY_RESULT(
       FindTServersForPlacementInfo(placement_info.live_replicas(),
        GetAllLiveNotBlacklistedTServers()));
-    LOG(INFO) << "INFO_A: live_tservers: " << live_tservers.size();
-    num_tablets = narrow_cast<int>(live_tservers.size() * FLAGS_transaction_table_num_tablets_per_tserver);
+    num_tablets = narrow_cast<int>(
+      live_tservers.size() * FLAGS_transaction_table_num_tablets_per_tserver);
   }
 
   req.mutable_schema()->mutable_table_properties()->set_num_tablets(num_tablets);

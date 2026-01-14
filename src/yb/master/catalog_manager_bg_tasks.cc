@@ -372,8 +372,7 @@ void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch
     return;  // No change in number of live tservers, nothing to do
   }
 
-  // tmp log
-  LOG(INFO) << "INFO_A: Number of live tservers changed from " << last_live_tservers_
+  LOG(INFO) << "Number of live tservers changed from " << last_live_tservers_
     << " to " << num_live_tservers;
 
   auto global_txn_table_result = catalog_manager_->GetGlobalTransactionStatusTable();
@@ -410,7 +409,7 @@ void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch
   // Check if they match
   bool tablets_match = (num_tablets >= expected_tablets);
 
-  LOG(INFO) << "INFO_A: Transaction status table check: "
+  LOG(INFO) << "Transaction status table check: "
             << (tablets_match ? "MATCH" : "MISMATCH")
             << ", tablets=" << num_tablets
             << ", expected=" << expected_tablets
@@ -432,12 +431,9 @@ void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch
       WARN_NOT_OK(s, "Transaction status table check: Failed to add tablet to "
           "transaction status table");
       if (!s.ok()) {
-        // tmp log
-        LOG(INFO) << "INFO_A: Transaction status table check: Failed to add "
-                     "tablet " << i << " to transaction status table: " << s.ToString();
         return;  // Stop trying if we hit an error
       }
-      LOG(INFO) << "INFO_A: Transaction status table check: Added " << i
+      LOG(INFO) << "Transaction status table check: Added " << i
                 << "tablet(s) to transaction status table";
     }
   }
@@ -449,7 +445,8 @@ void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch
   last_live_tservers_ = num_live_tservers;
   // Increment test counter to track that the task ran.
   if (FLAGS_TEST_transaction_status_check_run_count >= 0) {
-    ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_transaction_status_check_run_count) += 1;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_transaction_status_check_run_count)
+      = FLAGS_TEST_transaction_status_check_run_count + 1;
   }
 }
 
@@ -479,14 +476,11 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
 
       auto cloud_info = catalog_manager_->GetTableReplicationInfo(table);
       if (!cloud_info.ok()) {
-        LOG(INFO) << "INFO_A: failed to get cloud info : " << cloud_info.status().ToString()
+        LOG(WARNING) << "Failed to get cloud info : " << cloud_info.status().ToString()
                   << " - skipping table " << table->name()
                   << " (" << table_id << ")";
         continue;
       }
-
-      LOG(INFO) << "INFO_A: Table " << table->name() << " (" << table_id << ") "
-      << "cloud info found: " << cloud_info->ShortDebugString();
 
       transaction_tables.push_back({table, *cloud_info});
     }
@@ -500,7 +494,7 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
     auto live_tservers_result = catalog_manager_->FindTServersForPlacementInfo(
       cloud_info.live_replicas(), catalog_manager_->GetAllLiveNotBlacklistedTServers());
     if (!live_tservers_result.ok()) {
-      LOG(INFO) << "INFO_A: failed to find live tservers for placement info, "
+      LOG(WARNING) << "Failed to find live tservers for placement info, "
        << live_tservers_result.status().ToString()
        << " - skipping table " << table->name()
        << " (" << table->id() << ")";
@@ -508,8 +502,7 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
     }
     auto num_live_tservers = (*live_tservers_result).size();
     if (num_live_tservers == 0) {
-      LOG(WARNING) << "INFO_A: Local transaction status table check: No live tservers for "
-                    << " with cloud info: " << cloud_info.ShortDebugString()
+      LOG(WARNING) << "No live tservers for placement info :" << cloud_info.ShortDebugString()
                     << " - skipping table " << table->name()
                     << " (" << table->id() << ")";
       continue;
@@ -529,7 +522,7 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
     // Check if they match
     bool tablets_match = (num_tablets >= expected_tablets);
 
-    LOG(INFO) << "INFO_A: Local transaction status table check: "
+    LOG(INFO) << "Local transaction status table check: "
               << (tablets_match ? "MATCH" : "MISMATCH")
               << ", table=" << table->name() << " (" << table->id() << ") "
               << ", cloud info: " << cloud_info.ShortDebugString()
@@ -550,13 +543,9 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
         WARN_NOT_OK(s, "Local transaction status table check: Failed to add tablet to "
                        "transaction status table");
         if (!s.ok()) {
-          // tmp log
-          LOG(INFO) << "INFO_A: Local transaction status table check: Failed to add "
-                       "tablet " << i << " to transaction status table " << table->id()
-                    << ": " << s.ToString();
           return;  // Stop trying if we hit an error
         }
-        LOG(INFO) << "INFO_A: Local transaction status table check: Added " << i
+        LOG(INFO) << "Local transaction status table check: Added " << i
                   << " tablet(s) to transaction status table " << table->id();
       }
     }

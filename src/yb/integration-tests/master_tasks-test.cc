@@ -21,8 +21,6 @@
 
 #include "yb/client/client.h"
 #include "yb/yql/pgwrapper/pg_mini_test_base.h"
-#include "yb/master/mini_master.h"
-#include "yb/master/master_cluster_client.h"
 #include "yb/server/server_base.pb.h"
 #include "yb/server/server_base.proxy.h"
 #include "yb/rpc/rpc_controller.h"

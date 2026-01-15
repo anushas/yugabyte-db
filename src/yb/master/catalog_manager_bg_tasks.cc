@@ -76,6 +76,9 @@ DEFINE_RUNTIME_int32(transaction_status_check_interval_sec, 15*60,
     "Interval in seconds for checking transaction status table partitions/tablets count.");
 TAG_FLAG(transaction_status_check_interval_sec, advanced);
 
+DEFINE_RUNTIME_bool(autoscale_transaction_tables, true,
+    "Automatically scale transaction status tables based on the number of live tservers.");
+
 DEFINE_RUNTIME_int32(load_balancer_initial_delay_secs, yb::master::kDelayAfterFailoverSecs,
              "Amount of time to wait between becoming master leader and enabling the load "
              "balancer.");
@@ -305,7 +308,9 @@ void CatalogManagerBgTasks::RunOnceAsLeader(const LeaderEpoch& epoch) {
   master_->ysql_backends_manager()->AbortInactiveJobs();
 
   // Check transaction status table partitions/tablets count periodically.
-  CheckTransactionStatusTable(epoch);
+  if (FLAGS_autoscale_transaction_tables) {
+    CheckTransactionStatusTable(epoch);
+  }
 }
 
 void CatalogManagerBgTasks::MaybeRunClusterBalancer(

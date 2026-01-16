@@ -60,6 +60,7 @@ DECLARE_bool(auto_create_local_transaction_tables);
 DECLARE_bool(TEST_name_transaction_tables_with_tablespace_id);
 DECLARE_int32(replication_factor);
 DECLARE_bool(enable_load_balancing);
+DECLARE_bool(autoscale_transaction_tables);
 
 namespace yb {
 
@@ -131,137 +132,6 @@ TEST_F(MasterTasksTest, RetryingTSRpcTaskMaxDelay) {
       kNumRetries * RegularBuildVsSanitizers(1.1, 1.2) * 1ms);
   ASSERT_EQ(status, std::future_status::ready);
   ASSERT_OK(future.get());
-}
-
-// Test that the transaction status check background task runs
-// periodically and logs expected info and adds tablets to the
-// transaction status table when necessary.
-TEST_F(MasterTasksTest, TransactionStatusCheckBackgroundTask) {
-  // Set a short interval for the transaction status check (2 seconds)
-  // to make the test faster.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = 2;
-
-  // Save the original value of transaction_table_num_tablets and
-  // reset it for this test.
-  int32_t original_transaction_table_num_tablets = FLAGS_transaction_table_num_tablets;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) = 0;
-
-  // Save original value of transaction_table_num_tablets_per_tserver
-  // and set it to a known value to make this test deterministic.
-  int32_t original_transaction_table_num_tablets_per_tserver
-    = FLAGS_transaction_table_num_tablets_per_tserver;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver) = 2;
-
-  // Reset the test counter to track task executions.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_transaction_status_check_run_count) = 0;
-
-  // Create a client to access the cluster.
-  auto client = ASSERT_RESULT(cluster_->CreateClient());
-
-  // Set up a log sink to capture the background task's log messages.
-  yb::StringVectorSink log_sink;
-  yb::ScopedRegisterSink sink_guard(&log_sink);
-
-  // Wait for the transaction status table to be created.
-  // The table is created during master init.
-  ASSERT_OK(WaitFor([&]() -> Result<bool> {
-    auto result = client->GetTransactionStatusTablets(CloudInfoPB());
-    if (!result.ok()) {
-      return false;
-    }
-    auto txn_tablets = *result;
-    return !txn_tablets.global_tablets.empty();
-  }, MonoDelta::FromSeconds(30),
-  "Waiting for transaction status table to be created"));
-
-  // Wait for the background task to run at least once.
-  SleepFor(MonoDelta::FromSeconds(FLAGS_transaction_status_check_interval_sec + 2));
-
-  // Verify that the background task actually ran by checking the test counter.
-  int32_t run_count = FLAGS_TEST_transaction_status_check_run_count;
-  LOG(INFO) << "Background task run count: " << run_count;
-  ASSERT_EQ(run_count, 1)
-  << "Transaction status check background task should have run exactly once";
-
-  // Find and count the expected log messages
-  std::string log_prefix = "Transaction status table check: MATCH";
-  int log_message_count = 0;
-  std::string log_message;
-  const auto& logged_msgs = log_sink.logged_msgs();
-  // Use reverse iterators to search backward from the most recent messages
-  for (auto it = logged_msgs.rbegin(); it != logged_msgs.rend(); ++it) {
-    if (it->find(log_prefix) != std::string::npos) {
-      log_message_count++;
-      if (log_message.empty()) {
-        log_message = *it;  // Keep the most recent one for logging
-      }
-    }
-  }
-
-  ASSERT_FALSE(log_message.empty())
-    << "Expected log message '" << log_prefix << "' not found after background task ran";
-
-  ASSERT_EQ(log_message_count, 1) << "Should have found log message exactly once";
-
-  // Background task should not run again until the cluster config changes
-  SleepFor(MonoDelta::FromSeconds(FLAGS_transaction_status_check_interval_sec * 2));
-
-  // Verify that the background task did not run again when nothing changed.
-  int32_t run_count2 = FLAGS_TEST_transaction_status_check_run_count;
-  LOG(INFO) << "Background task run count2: " << run_count2;
-  ASSERT_EQ(run_count2, run_count)
-    << "Transaction status check background task should not run again";
-
-  // Now add a tablet server to trigger the background task to run again.
-  size_t initial_tserver_count = cluster_->num_tablet_servers();
-  LOG(INFO) << "Adding a new tablet server. Current count: " << initial_tserver_count;
-  ASSERT_OK(cluster_->AddTabletServer());
-
-  // Wait for the new tserver to register with the master.
-  ASSERT_OK(cluster_->WaitForTabletServerCount(initial_tserver_count + 1));
-
-  // Wait for the background task to detect the change and run.
-  SleepFor(MonoDelta::FromSeconds(FLAGS_transaction_status_check_interval_sec + 2));
-
-  // Verify that the background task ran again after adding the tserver.
-  run_count2 = FLAGS_TEST_transaction_status_check_run_count;
-  LOG(INFO) << "Background task run count3: " << run_count2;
-  ASSERT_GT(run_count2, run_count)
-    << "Transaction status check background task should have run again after adding tserver";
-
-  // Find the most recent log message - should be MISMATCH.
-  log_prefix = "Transaction status table check: MISMATCH";
-  std::string latest_log_message;
-  for (auto it = logged_msgs.rbegin(); it != logged_msgs.rend(); ++it) {
-    if (it->find(log_prefix) != std::string::npos) {
-      latest_log_message = *it;
-      break;  // Found the most recent one
-    }
-  }
-
-  ASSERT_FALSE(latest_log_message.empty())
-    << "Expected log message '" << log_prefix << "' not found after adding tserver";
-
-  // wait until the background task has finished creating the tablets
-  ASSERT_OK(WaitFor([&]() -> Result<bool> {
-    auto result = client->GetTransactionStatusTablets(CloudInfoPB());
-    if (!result.ok()) {
-      return false;
-    }
-    auto txn_tablets = *result;
-    LOG(INFO) << "Found " << txn_tablets.global_tablets.size() << " tablets";
-    size_t expected_tablets =
-      cluster_->num_tablet_servers()*FLAGS_transaction_table_num_tablets_per_tserver;
-    return txn_tablets.global_tablets.size() == expected_tablets;
-  }, MonoDelta::FromSeconds(30),
-  "Waiting for background task to finish creating tablets"));
-
-  // Restore the original value of transaction_table_num_tablets.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets)
-    = original_transaction_table_num_tablets;
-  // Restore the original value of transaction_table_num_tablets_per_tserver.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver)
-    = original_transaction_table_num_tablets_per_tserver;
 }
 
 class SingleMasterTasksTest : public MasterTasksTest {
@@ -562,7 +432,10 @@ class MasterTasksTest2 : public pgwrapper::PgMiniTestBase {
 
 // Test that the transaction status check background task runs
 // periodically and logs expected info for local transaction status tables.
-TEST_F(MasterTasksTest2, LocalTransactionStatusCheckBackgroundTask) {
+TEST_F(MasterTasksTest2, TransactionStatusCheckBackgroundTask) {
+  ASSERT_TRUE(FLAGS_autoscale_transaction_tables)
+    << "autoscale_transaction_tables must be enabled (default is true) for this test";
+
   // Set a short interval for the transaction status check (2 seconds)
   // to make the test faster.
   int32_t original_transaction_status_check_interval_sec
@@ -602,6 +475,18 @@ TEST_F(MasterTasksTest2, LocalTransactionStatusCheckBackgroundTask) {
 
   // test assumptions
   ASSERT_EQ(cluster_->num_tablet_servers(), 1);
+
+  // Wait for the global transaction status table to be created.
+  // The table is created during master init.
+  ASSERT_OK(WaitFor([&]() -> Result<bool> {
+    auto result = client->GetTransactionStatusTablets(CloudInfoPB());
+    if (!result.ok()) {
+      return false;
+    }
+    auto txn_tablets = *result;
+    return !txn_tablets.global_tablets.empty();
+  }, MonoDelta::FromSeconds(30),
+  "Waiting for transaction status table to be created"));
 
   // background task runs once each time tserver joins
   WaitAndVerifyBackgroundTaskRuns(1, "init");

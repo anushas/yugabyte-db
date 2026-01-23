@@ -619,6 +619,9 @@ DEFINE_test_flag(bool, fail_yugabyte_namespace_creation_on_second_attempt, false
 DEFINE_test_flag(bool, enable_multi_way_tablet_split, false,
     "Enable splitting a tablet into more than two child tablets");
 
+DEFINE_test_flag(bool, abort_create_pg_auto_analyze_table, false,
+    "Abort the creation of the pg auto analyze table");
+
 DECLARE_bool(enable_pg_cron);
 DECLARE_bool(enable_truncate_cdcsdk_table);
 DECLARE_bool(TEST_enable_table_rewrite_for_cdcsdk_table);
@@ -4721,6 +4724,17 @@ Status CatalogManager::CreateTable(const CreateTableRequestPB* orig_req,
       // If new tablets are created, they will be in PREPARING state.
       CHECK_EQ(SysTabletsEntryPB::PREPARING, tablet->metadata().dirty().pb.state());
     }
+  }
+
+  // tmp log
+  // if test flag is set and this is to create pg auto analyze table, abort the table creation.
+  if (FLAGS_TEST_abort_create_pg_auto_analyze_table &&
+    req.name().starts_with("pg_auto_analyze_")) {
+    auto s = Status(Status::kIllegalState, __FILE__, __LINE__,
+      "TEST: Aborting due to FLAGS_TEST_abort_create_pg_auto_analyze_table");
+    LOG(INFO) << "TEST: Aborting creation of table " << req.name()
+    << " because FLAGS_TEST_abort_create_pg_auto_analyze_table is set" << GetStackTrace();
+    return AbortTableCreation(table.get(), tablets, s, resp);
   }
 
   s = sys_catalog_->Upsert(epoch, table, tablets);

@@ -82,6 +82,7 @@
 #include "yb/tablet/transaction_participant.h"
 #include "yb/tablet/write_query.h"
 
+#include "yb/util/debug-util.h"
 #include "yb/util/fault_injection.h"
 #include "yb/util/format.h"
 #include "yb/util/logging.h"
@@ -484,7 +485,7 @@ Status TabletPeer::Start(const ConsensusBootstrapInfo& bootstrap_info) {
 }
 
 bool TabletPeer::StartShutdown() {
-  LOG_WITH_PREFIX(INFO) << "Initiating TabletPeer shutdown";
+  LOG_WITH_PREFIX(INFO) << "Initiating TabletPeer shutdown" << GetStackTrace();
 
   {
     std::lock_guard lock(lock_);

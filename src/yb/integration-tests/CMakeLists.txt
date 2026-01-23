@@ -342,6 +342,7 @@ function(ADD_YB_PG_TEST TEST_NAME)
 endfunction()
 
 ADD_YB_PG_TEST(async_writes-test)
+ADD_YB_PG_TEST(create_abort-test)
 ADD_YB_PG_TEST(disk_full-test)
 ADD_YB_PG_TEST(documentdb/documentdb_test)
 ADD_YB_PG_TEST(minicluster-snapshot-test)

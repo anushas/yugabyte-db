@@ -248,6 +248,8 @@ DEFINE_test_flag(bool, get_ysql_catalog_version_from_sys_catalog, false,
                  "Whether catalog manager should get the ysql catalog version "
                  "from the sys_catalog.");
 
+DEFINE_test_flag(uint32, abort_create_table, 0,
+    "Abort the creation of a table at a specified point in code.");
 
 // TODO: should this be a test flag?
 DEFINE_RUNTIME_int32(catalog_manager_inject_latency_in_delete_table_ms, 0,
@@ -2289,7 +2291,8 @@ void CatalogManager::CompleteShutdown() {
 Status CatalogManager::AbortTableCreation(TableInfo* table,
                                           const TabletInfos& tablets,
                                           const Status& s,
-                                          CreateTableResponsePB* resp) {
+                                          CreateTableResponsePB* resp,
+                                          TableInfoWithWriteLock* indexed_table) {
   LOG(WARNING) << s;
 
   const TableId table_id = table->id();
@@ -2308,20 +2311,36 @@ Status CatalogManager::AbortTableCreation(TableInfo* table,
   // all tasks, as (by definition) no tasks may be pending against a
   // table that has failed to successfully create.
   table->CloseAndWaitForAllTasksToAbort();
+
+  // Call AbortMutation() manually to release the lock.
+  // Callers are assumed to have done some changes and
+  // called StartMutation() earlier.
+  for (const auto& tablet : tablets) {
+    tablet->mutable_metadata()->AbortMutation();
+  }
+  table->mutable_metadata()->AbortMutation();
+
+  // For an index, must also release the indexed_table lock
+  // that was acquired earlier. The indexed_table lock may be
+  // already released depending on the error causing the abort.
+  // Unlock() api checks for that internally.
+  // Note that the two locks are acquired based on the table_id
+  // order to avoid deadlocks. But can be released in any order
+  // w/o affecting correctness.
+  if (indexed_table && *indexed_table) {
+    // tmp log
+    LOG(INFO) << "INFO_A: Aborting mutation on indexed table ";
+    indexed_table->lock.Unlock();
+  }
+
+  // Remove the metadata from the catalog manager
   {
     LockGuard lock(mutex_);
-
-    // Call AbortMutation() manually, as otherwise the lock won't be released.
-    for (const auto& tablet : tablets) {
-      tablet->mutable_metadata()->AbortMutation();
-    }
-    table->mutable_metadata()->AbortMutation();
     auto tablet_map_checkout = tablet_map_.CheckOut();
     for (const TabletId& tablet_id_to_erase : tablet_ids_to_erase) {
       CHECK_EQ(tablet_map_checkout->erase(tablet_id_to_erase), 1)
           << "Unable to erase tablet " << tablet_id_to_erase << " from tablet map.";
     }
-
     auto table_map_checkout = tables_.CheckOut();
     table_names_map_.erase({table_namespace_id, table_name});  // Not present if PGSQL table.
     CHECK_EQ(table_map_checkout->Erase(table_id), 1)
@@ -2734,6 +2753,9 @@ Status CatalogManager::AddIndexInfoToTable(TableInfoWithWriteLock& indexed_table
   TRACE("Committing in-memory state");
   l.Commit();
 
+  // Verify: what if we commit the in-memory state and then
+  // return a failure status from SendAlterTableRequest()?
+  // CreateTable() will abort index creation on NOT_OK.
   RETURN_NOT_OK(SendAlterTableRequest(indexed_table.info, epoch));
 
   return Status::OK();
@@ -3779,9 +3801,12 @@ Status CatalogManager::CompleteCreateYsqlSysTable(
     s = writer->Mutate<false>(QLWriteRequestPB::QL_STMT_UPDATE, data.table);
   }
   if (PREDICT_FALSE(!s.ok())) {
+    // Verify: Assuming system table codepath for CQL is always creating a table,
+    // never an index. Assert this?
     return AbortTableCreation(
         data.table.get(), {},
-        s.CloneAndPrepend("An error occurred while inserting to sys-tablets: "), &data.resp);
+        s.CloneAndPrepend("An error occurred while inserting to sys-tablets: "),
+          &data.resp, nullptr /* indexed_table */);
   }
   TRACE("Wrote table to system table");
 
@@ -3845,9 +3870,12 @@ Status CatalogManager::CreateYsqlSysTable(
       s = sys_catalog_->Upsert(epoch, sys_catalog_tablet);
     }
     if (PREDICT_FALSE(!s.ok())) {
+      // Verify: Assuming system table codepath for SQL is always creating a table,
+      // never an index. Assert this?
       return AbortTableCreation(
           data.table.get(), {},
-          s.CloneAndPrepend("An error occurred while inserting to sys-tablets: "), &data.resp);
+          s.CloneAndPrepend("An error occurred while inserting to sys-tablets: "),
+            &data.resp, nullptr /* indexed_table */);
     }
     // TODO(zdrudi): to handle the new format for the sys tablet, set the child table's parent table
     // id and add to the tablet's in-memory list of hosted table ids.
@@ -4721,11 +4749,24 @@ Status CatalogManager::CreateTable(const CreateTableRequestPB* orig_req,
     }
   }
 
+  auto test_abort = FLAGS_TEST_abort_create_table;
+  // tmp log
+  LOG(INFO) << "INFO_A: Creating table " << req.name() << " IsIndex: " << IsIndex(req)
+    << " with test flag: " << test_abort;
+  // if test flag to abort create table is set and this is to create
+  // test table, fake abort the table creation.
+  // case 1: fakes the case where the Upsert failed.
+  if ((test_abort == 1) && req.name().starts_with("test_create_abort_")) {
+    auto s = Status(Status::kInternalError, __FILE__, __LINE__,
+        "TEST: Aborting due to FLAGS_TEST_abort_create_table");
+    return AbortTableCreation(table.get(), tablets, s, resp, &indexed_table);
+  }
+
   s = sys_catalog_->Upsert(epoch, table, tablets);
   if (PREDICT_FALSE(!s.ok())) {
     return AbortTableCreation(
         table.get(), tablets, s.CloneAndPrepend("An error occurred while inserting to sys-tablets"),
-        resp);
+        resp, &indexed_table);
   }
   VLOG(3) << "SysTablesEntryPB after CreateTable: " << table->metadata().dirty().pb.DebugString();
   TRACE("Wrote table and tablets to system table");
@@ -4743,11 +4784,35 @@ Status CatalogManager::CreateTable(const CreateTableRequestPB* orig_req,
         index_info.set_index_permissions(INDEX_PERM_DELETE_ONLY);
       }
     }
+
+    // tmp log
+    LOG(INFO) << "INFO_A: Adding index info to table " << req.name()
+      << " with test flag: " << test_abort;
+    // if test flag to abort create table is set and this is to create
+    // test table, fake abort the table creation.
+    // case 2: fakes the case where Upsert was successful but
+    // AddIndexInfoToTable failed before Upsert while still holding
+    // the lock on the indexed table.
+    if ((test_abort == 2) && req.name().starts_with("test_create_abort_")) {
+      auto s = Status(Status::kInternalError, __FILE__, __LINE__,
+        "TEST: Aborting due to FLAGS_TEST_abort_create_table");
+      return AbortTableCreation(table.get(), tablets, s, resp, &indexed_table);
+    }
+
     s = AddIndexInfoToTable(indexed_table, index_info, epoch, resp);
     if (PREDICT_FALSE(!s.ok())) {
       return AbortTableCreation(
           table.get(), tablets, s.CloneAndPrepend("An error occurred while inserting index info"),
-          resp);
+          resp, &indexed_table);
+    }
+    // if test flag to abort create table is set and this is to create
+    // test table, fake abort the table creation.
+    // case 3: fakes the case where AddIndexInfoToTable failed after
+    // after committing & releasing the lock on the indexed table.
+    if ((test_abort == 3) && req.name().starts_with("test_create_abort_")) {
+      auto s = Status(Status::kInternalError, __FILE__, __LINE__,
+        "TEST: Aborting due to FLAGS_TEST_abort_create_table");
+      return AbortTableCreation(table.get(), tablets, s, resp, &indexed_table);
     }
   }
 

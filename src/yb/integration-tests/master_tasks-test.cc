@@ -21,19 +21,11 @@
 
 #include "yb/client/client.h"
 #include "yb/yql/pgwrapper/pg_mini_test_base.h"
-#include "yb/server/server_base.pb.h"
-#include "yb/server/server_base.proxy.h"
-#include "yb/rpc/rpc_controller.h"
-#include "yb/rpc/proxy.h"
-#include "yb/rpc/messenger.h"
-#include "yb/gutil/strtoint.h"
-#include "yb/common/entity_ids.h"
 
 #include "yb/master/catalog_manager.h"
 #include "yb/master/master.h"
 #include "yb/master/master_ddl.proxy.h"
 #include "yb/master/master_ddl_client.h"
-#include "yb/master/master_cluster_client.h"
 #include "yb/master/mini_master.h"
 #include "yb/master/test_async_rpc_manager.h"
 
@@ -41,11 +33,8 @@
 #include "yb/tserver/tablet_server.h"
 
 #include "yb/util/backoff_waiter.h"
-#include "yb/util/countdown_latch.h"
-#include "yb/util/logging_test_util.h"
 #include "yb/util/status_callback.h"
 #include "yb/util/test_macros.h"
-#include "yb/util/unique_lock.h"
 
 using namespace std::chrono_literals;
 
@@ -55,7 +44,6 @@ DECLARE_int32(transaction_status_check_interval_sec);
 DECLARE_int32(transaction_table_num_tablets);
 DECLARE_int32(transaction_table_num_tablets_per_tserver);
 DECLARE_int32(TEST_transaction_status_check_run_count);
-DECLARE_int32(tserver_unresponsive_timeout_ms);
 DECLARE_bool(auto_create_local_transaction_tables);
 DECLARE_bool(TEST_name_transaction_tables_with_tablespace_id);
 DECLARE_int32(replication_factor);

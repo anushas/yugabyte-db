@@ -794,22 +794,18 @@ bool IsIndexBackfillEnabled(TableType table_type, bool is_transactional) {
 constexpr auto kDefaultYQLPartitionsRefreshBgTaskSleep = 10s;
 
 int GetTransactionTableNumShardsPerTServer() {
-  // This logic does not seem to be reliable.
+  // GHI #30087. This logic does not seem to be reliable.
   // 1. This code is exercised during yb-master startup
-  //  and is looking at CPU cores for yb-master leader
-  //  node, and the CPU cores for tservers that host
-  //  these tablets.
-  // 2. Even if the yb-master leader later reboots
-  //  with more CPU cores, the number of tablets will not
-  //  change since we already set the transaction_table_num_tablets_per_tserver
-  //  on first boot.
-  // 3. Even with an explicit change to transaction_table_num_tablets_per_tserver
+  //  and looks at CPU cores on yb-master leader node,
+  //  and not the CPU cores for tservers that host these tablets.
+  // 2. Even with an explicit change to transaction_table_num_tablets_per_tserver
   //  value (and reboot), the number of tablets for the existing
   //  transaction status tables will not be changed.
   //
-  // With D-19366 changes to automatically add tablets
-  // when config changes or tservers are added, we can replace
+  // With GHI #29555 code to automatically add tablets
+  // when config changes (on reboot) or tservers are added, we can replace
   // this with a simple default irrespective of CPU cores.
+  // GHI #30087 tracks that.
   int value = 8;
   if (IsTsan()) {
     value = 2;
@@ -5276,8 +5272,8 @@ Status CatalogManager::CreateTransactionStatusTableInternal(
     return STATUS_SUBSTITUTE(AlreadyPresent, "Table already exists: $0", table_name);
   }
 
-  LOG(INFO) << "Creating transaction status table: "
-    << table_name << "\n" << GetStackTrace();
+  LOG(INFO) << "Creating transaction status table: " << table_name;
+
   // Set up a CreateTable request internally.
   CreateTableRequestPB req;
   CreateTableResponsePB resp;

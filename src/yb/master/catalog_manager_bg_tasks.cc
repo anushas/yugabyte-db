@@ -407,29 +407,18 @@ void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch
     = GetAtomicFlag(&FLAGS_transaction_table_num_tablets_per_tserver);
   size_t expected_tablets = (flag_num_tablets > 0) ? flag_num_tablets
                               : (num_live_tservers * flag_num_tablets_per_tserver);
-  // ignore boot time setting - going away soon
-  int boot_time_shards_per_tserver = 8;
-  if (IsTsan()) {
-    boot_time_shards_per_tserver = 2;
-  } else if (base::NumCPUs() <= 2) {
-    boot_time_shards_per_tserver = 4;
-  }
 
   // Check if they match
   bool tablets_match = (num_tablets >= expected_tablets);
 
-  LOG(INFO) << "Transaction status table check: "
-            << (tablets_match ? "MATCH" : "MISMATCH")
+  if (!tablets_match) {
+    LOG(INFO) << "Global transaction status table check: MISMATCH"
             << ", tablets=" << num_tablets
             << ", expected=" << expected_tablets
             << " (flag_num_tablets=" << flag_num_tablets
             << " or (num_tservers=" << num_live_tservers
             << " * tablets_per_tserver=" << flag_num_tablets_per_tserver << "))"
-            << ", boot_time_shards_per_tserver=" << boot_time_shards_per_tserver
             << ", num_tablets_per_tserver=" << num_tablets_per_tserver;
-
-
-  if (!tablets_match) {
     size_t tablets_to_add = expected_tablets - num_tablets;
     // Add tablets to the transaction status table.
     for (size_t i = 1; i <= tablets_to_add; i++) {
@@ -442,8 +431,8 @@ void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch
       if (!s.ok()) {
         return;  // Stop trying if we hit an error
       }
-      LOG(INFO) << "Transaction status table check: Added " << i
-                << "tablet(s) to transaction status table";
+      VLOG(1) << "Global transaction status table check: Added " << i
+                << " tablet(s) to transaction status table";
     }
   }
 
@@ -531,8 +520,8 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
     // Check if they match
     bool tablets_match = (num_tablets >= expected_tablets);
 
-    LOG(INFO) << "Local transaction status table check: "
-              << (tablets_match ? "MATCH" : "MISMATCH")
+    if (!tablets_match) {
+      LOG(INFO) << "Local transaction status table check: MISMATCH"
               << ", table=" << table->name() << " (" << table->id() << ") "
               << ", cloud info: " << cloud_info.ShortDebugString()
               << ", tablets=" << num_tablets
@@ -540,8 +529,6 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
               << " (flag_num_tablets=" << flag_num_tablets
               << " or (num_tservers=" << num_live_tservers
               << " * tablets_per_tserver=" << flag_num_tablets_per_tserver << "))";
-
-    if (!tablets_match) {
       size_t tablets_to_add = expected_tablets - num_tablets;
       // Add tablets to the transaction status table.
       for (size_t i = 1; i <= tablets_to_add; i++) {
@@ -554,7 +541,7 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
         if (!s.ok()) {
           return;  // Stop trying if we hit an error
         }
-        LOG(INFO) << "Local transaction status table check: Added " << i
+        VLOG(1) << "Local transaction status table check: Added " << i
                   << " tablet(s) to transaction status table " << table->id();
       }
     }

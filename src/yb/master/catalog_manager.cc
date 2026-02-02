@@ -5273,7 +5273,6 @@ Status CatalogManager::CreateTransactionStatusTableInternal(
   }
 
   LOG(INFO) << "Creating transaction status table: " << table_name;
-
   // Set up a CreateTable request internally.
   CreateTableRequestPB req;
   CreateTableResponsePB resp;

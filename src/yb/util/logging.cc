@@ -368,6 +368,29 @@ void GetFullLogFilename(google::LogSeverity severity, string* filename) {
   *filename = ss.str();
 }
 
+void GetLogFilePathNoSeverity(string *filename) {
+  stringstream ss;
+  ss << FLAGS_log_dir << "/" << FLAGS_log_filename << ".";
+  *filename = ss.str();
+}
+
+// This code is a copy of the google/glog C++ library code to build the
+// time_pid_string used in CreateLogfile() for log file name suffix.
+// This helper function used to print the suffix in tserver.err/master.err
+// at boot time to help locate the right log file during incident troubleshooting.
+std::string GetTimePidString(uint64_t now_micros, int pid) {
+  time_t now_seconds = static_cast<time_t>(now_micros / 1000000);
+  struct ::tm tm_time;
+  localtime_r(&now_seconds, &tm_time);
+  std::ostringstream time_pid_stream;
+  time_pid_stream.fill('0');
+  time_pid_stream << 1900 + tm_time.tm_year << std::setw(2) << 1 + tm_time.tm_mon
+                  << std::setw(2) << tm_time.tm_mday << '-' << std::setw(2)
+                  << tm_time.tm_hour << std::setw(2) << tm_time.tm_min << std::setw(2)
+                  << tm_time.tm_sec << '.' << pid;
+  return time_pid_stream.str();
+}
+
 void ShutdownLoggingSafe() {
   SpinLockHolder l(&logging_mutex);
   if (!logging_initialized) return;

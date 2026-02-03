@@ -370,10 +370,11 @@ void GetFullLogFilename(google::LogSeverity severity, string* filename) {
   *filename = ss.str();
 }
 
-// Note: JoinPathSegments() will throw an exception if these
-// flags are empty (uninitialized). Call with caution.
 string GetLogFilePathnamePrefix() {
-  return JoinPathSegments(FLAGS_log_dir, FLAGS_log_filename + ".");
+  if (FLAGS_log_dir.empty() || FLAGS_log_filename.empty()) {
+    return "<empty_log_dir_or_filename>";
+  }
+  return JoinPathSegments(FLAGS_log_dir, FLAGS_log_filename);
 }
 
 // This code is a copy of the google/glog C++ library code to build the

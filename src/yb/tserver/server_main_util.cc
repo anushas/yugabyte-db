@@ -275,11 +275,9 @@ Status MasterTServerParseFlagsAndInit(
 
   RETURN_NOT_OK(GetPrivateIpMode());
 
-  std::string logfile_path_;
-  GetLogFilePathNoSeverity(&logfile_path_);
-  std::string logfile_suffix = GetTimePidString(Env::Default()->NowMicros(), getpid());
   std::cerr << "Started process id: " << getpid()
-    << " logfile(s): " << logfile_path_ << "*" << logfile_suffix << std::endl;
+    << " logfile(s): " << GetLogFilePathNoSeverity() << "*"
+    << GetTimePidString(Env::Default()->NowMicros(), getpid()) << std::endl;
 
   LOG(INFO) << "NumCPUs determined to be: " << base::NumCPUs();
 

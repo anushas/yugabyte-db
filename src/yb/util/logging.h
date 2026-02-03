@@ -279,7 +279,7 @@ void UnregisterLoggingCallback();
 void GetFullLogFilename(google::LogSeverity severity, std::string* filename);
 
 // Retuns the log file path without the severity suffix
-std::string GetLogFilePathNoSeverity();
+std::string GetLogFilePathnamePrefix();
 
 // Returns the time and pid string for the given time (in microseconds) and pid
 // in the format <date>.<time>.<pid> as used in the log file names.

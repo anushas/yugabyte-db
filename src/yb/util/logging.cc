@@ -60,6 +60,7 @@
 #include "yb/util/debug-util.h"
 #include "yb/util/flags.h"
 #include "yb/util/format.h"
+#include "yb/util/path_util.h"
 #include "yb/util/symbolize.h"
 #include "yb/util/thread.h"
 
@@ -369,8 +370,10 @@ void GetFullLogFilename(google::LogSeverity severity, string* filename) {
   *filename = ss.str();
 }
 
-string GetLogFilePathNoSeverity() {
-  return FLAGS_log_dir + "/" + FLAGS_log_filename + ".";
+// Note: JoinPathSegments() will throw an exception if these
+// flags are empty (uninitialized). Call with caution.
+string GetLogFilePathnamePrefix() {
+  return JoinPathSegments(FLAGS_log_dir, FLAGS_log_filename + ".");
 }
 
 // This code is a copy of the google/glog C++ library code to build the

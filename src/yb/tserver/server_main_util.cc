@@ -273,11 +273,11 @@ Status MasterTServerParseFlagsAndInit(
 
   RETURN_NOT_OK(InitYB(server_type, (*argv)[0]));
 
-  RETURN_NOT_OK(GetPrivateIpMode());
-
   std::cerr << "Started process id: " << getpid()
-    << " logfile(s): " << GetLogFilePathNoSeverity() << "*"
+    << " logfile(s): " << GetLogFilePathnamePrefix() << "*"
     << GetTimePidString(Env::Default()->NowMicros(), getpid()) << std::endl;
+
+  RETURN_NOT_OK(GetPrivateIpMode());
 
   LOG(INFO) << "NumCPUs determined to be: " << base::NumCPUs();
 

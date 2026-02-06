@@ -30,6 +30,7 @@
 // under the License.
 //
 
+#include <future>
 #include <limits>
 
 #include "yb/util/flags.h"
@@ -50,6 +51,7 @@
 #include "yb/tserver/remote_bootstrap-test-base.h"
 #include "yb/tserver/remote_bootstrap.pb.h"
 #include "yb/tserver/remote_bootstrap.proxy.h"
+#include "yb/tserver/remote_bootstrap_session.h"
 
 #include "yb/util/crc.h"
 #include "yb/util/env_util.h"
@@ -65,6 +67,13 @@ using std::vector;
 
 DECLARE_uint64(remote_bootstrap_idle_timeout_ms);
 DECLARE_uint64(remote_bootstrap_timeout_poll_period_ms);
+
+// Flag is defined in tablet_snapshots.cc
+DECLARE_int32(TEST_sleep_seconds_in_create_checkpoint);
+
+// Flags for test output
+DECLARE_int32(remote_bootstrap_begin_session_timeout_ms);
+DECLARE_int32(rbs_init_max_number_of_retries);
 
 namespace yb {
 namespace tserver {
@@ -400,6 +409,60 @@ TEST_F(RemoteBootstrapServiceTest, TestSessionTimeout) {
   } while (MonoTime::Now().GetDeltaSince(start_time).ToSeconds() < 10);
 
   ASSERT_FALSE(resp.session_is_active()) << "Remote bootstrap session did not time out!";
+}
+
+// Test that when a remote bootstrap session holds the checkpoint lock (via blocking lock),
+// a subsequent remote bootstrap session using try_lock fails to acquire the lock and returns TryAgain.
+// This simulates the scenario where:
+// 1. First RPC acquires checkpoint lock and takes a long time (sleeps)
+// 2. Client times out on first RPC
+// 3. Second RPC is sent, uses try_lock, fails to acquire mutex, returns TryAgain
+TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
+  // Set test flag to sleep for 5 seconds after acquiring checkpoint lock.
+  //ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_sleep_seconds_in_create_checkpoint) = 5;
+  SetAtomicFlag(10, &FLAGS_TEST_sleep_seconds_in_create_checkpoint);
+
+  LOG(INFO) << "Test configuration: remote_bootstrap_begin_session_timeout_ms="
+            << FLAGS_remote_bootstrap_begin_session_timeout_ms
+            << ", rbs_init_max_number_of_retries="
+            << FLAGS_rbs_init_max_number_of_retries
+            << ", TEST_sleep_seconds_in_create_checkpoint="
+            << FLAGS_TEST_sleep_seconds_in_create_checkpoint;
+
+  // Create two sessions that will try to acquire the lock.
+  scoped_refptr<RemoteBootstrapSession> session1;
+  session1.reset(new RemoteBootstrapSession(
+      tablet_peer_, "TestSession1", "FakeUUID1", /*nsessions=*/nullptr));
+
+  scoped_refptr<RemoteBootstrapSession> session2;
+  session2.reset(new RemoteBootstrapSession(
+      tablet_peer_, "TestSession2", "FakeUUID2", /*nsessions=*/nullptr));
+
+  // Start first session in a thread - it will acquire the lock and sleep.
+  auto* first_session_ptr = session1.get();
+  auto first_session_future = std::async(std::launch::async, [first_session_ptr]() {
+    return first_session_ptr->InitBootstrapSession();
+  });
+
+  // Wait for first session to start and acquire the lock.
+  SleepFor(MonoDelta::FromMilliseconds(100));
+
+  // Now try to start a second session - it should fail to acquire the lock with try_lock.
+  Status second_session_status = session2->InitBootstrapSession();
+
+  // Verify the second session failed with TryAgain status.
+  ASSERT_TRUE(second_session_status.IsInternalError())
+      << "Expected InternalError status, got: " << second_session_status;
+  ASSERT_STR_CONTAINS(second_session_status.ToString(),
+                      "Unable to acquire checkpoint lock");
+
+  // Wait for first session to complete and verify it succeeded.
+  Status first_session_status = first_session_future.get();
+  ASSERT_OK(first_session_status);
+
+  // Reset the test flag.
+  //ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_sleep_seconds_in_create_checkpoint) = 0;
+  SetAtomicFlag(0, &FLAGS_TEST_sleep_seconds_in_create_checkpoint);
 }
 
 } // namespace tserver

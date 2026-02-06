@@ -82,10 +82,14 @@ class TabletSnapshots : public TabletComponent {
   // YQL_TABLE_TYPE.
   // Parameter `create_checkpoint_in` specifies whether to create sub-components checkpoint inside
   // <dir>/<sub-component-storage> or <dir>.<sub-component-storage>
+  // Parameter `use_try_lock` if true, will use try_lock instead of blocking lock. If the lock
+  // cannot be acquired, the function will return early. Used for remote bootstrap to simulate
+  // a long checkpoint.
   // In case of failure, the caller is responsible for cleanup.
   Status CreateCheckpoint(
       const std::string& dir,
-      CreateCheckpointIn create_checkpoint_in = CreateCheckpointIn::kSubDir);
+      CreateCheckpointIn create_checkpoint_in = CreateCheckpointIn::kSubDir,
+      bool use_try_lock = false);
 
   // Returns the location of the last rocksdb checkpoint. Used for tests only.
   std::string TEST_LastRocksDBCheckpointDir() { return TEST_last_rocksdb_checkpoint_dir_; }

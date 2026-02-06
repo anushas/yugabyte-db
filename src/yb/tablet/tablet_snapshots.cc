@@ -13,6 +13,8 @@
 
 #include "yb/tablet/tablet_snapshots.h"
 
+#include <unistd.h>
+
 #include <boost/algorithm/string/predicate.hpp>
 
 #include "yb/ash/wait_state.h"
@@ -69,6 +71,9 @@ DEFINE_test_flag(int32, delay_tablet_export_metadata_ms, 0,
 
 DEFINE_test_flag(double, delay_create_snapshot_probability, 0.0,
     "The probability to delay creating snapshot by 1 second");
+
+DEFINE_test_flag(int32, sleep_seconds_in_create_checkpoint, 0,
+                 "Sleep for this many seconds after acquiring checkpoint lock in CreateCheckpoint.");
 
 namespace yb::tablet {
 
@@ -683,13 +688,23 @@ Status TabletSnapshots::Delete(const SnapshotOperation& operation) {
 }
 
 Status TabletSnapshots::CreateCheckpoint(
-    const std::string& dir, const CreateCheckpointIn create_checkpoint_in) {
+    const std::string& dir, const CreateCheckpointIn create_checkpoint_in, bool use_try_lock) {
   ScopedRWOperation scoped_read_operation(&pending_op_counter_blocking_rocksdb_shutdown_start());
   RETURN_NOT_OK(scoped_read_operation);
 
   Status status;
   {
-    std::lock_guard lock(create_checkpoint_lock());
+    std::unique_lock<std::mutex> lock(create_checkpoint_lock(), std::defer_lock);
+    if (use_try_lock) {
+      if (!lock.try_lock()) {
+        LOG(INFO) << "INFO_A: [pid=" << getpid() << "] Unable to acquire checkpoint lock, another checkpoint operation is in progress";
+        return STATUS(InternalError, "Unable to acquire checkpoint lock, another checkpoint operation is in progress");
+      }
+      LOG(INFO) << "INFO_D: [pid=" << getpid() << "] Acquired checkpoint lock with try_lock";
+    } else {
+      lock.lock();
+      LOG(INFO) << "INFO_E: [pid=" << getpid() << "] Acquired checkpoint lock with lock";
+    }
 
     if (!has_regular_db()) {
       LOG_WITH_PREFIX(INFO) << "Skipped creating checkpoint in " << dir;
@@ -700,6 +715,13 @@ Status TabletSnapshots::CreateCheckpoint(
     auto parent_dir = DirName(dir);
     RETURN_NOT_OK_PREPEND(metadata().fs_manager()->CreateDirIfMissing(parent_dir),
                           Format("Unable to create checkpoints directory $0", parent_dir));
+
+    // Test hook: sleep after acquiring lock to simulate long-running checkpoint operation.
+    if (PREDICT_FALSE(FLAGS_TEST_sleep_seconds_in_create_checkpoint > 0)) {
+      LOG(INFO) << "INFO_B: [pid=" << getpid() << "] Sleeping for " << FLAGS_TEST_sleep_seconds_in_create_checkpoint << " seconds";
+      SleepFor(MonoDelta::FromSeconds(FLAGS_TEST_sleep_seconds_in_create_checkpoint));
+      LOG(INFO) << "INFO_C: [pid=" << getpid() << "] Done sleeping";
+    }
 
     // Order does not matter because we flush both DBs and does not have parallel writes.
     status = DoCreateCheckpoint(dir, create_checkpoint_in);

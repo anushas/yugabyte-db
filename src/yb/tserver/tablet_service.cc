@@ -3236,6 +3236,7 @@ void ConsensusServiceImpl::StartRemoteBootstrap(const StartRemoteBootstrapReques
       YB_LOG_EVERY_N_SECS(WARNING, 5) << "Start remote bootstrap failed: " << s;
     } else {
       LOG(WARNING) << "Start remote bootstrap failed: " << s;
+      // TODO: for timeouts, should we try to kill the thread we started
     }
   }
 

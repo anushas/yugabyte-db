@@ -697,16 +697,10 @@ Status TabletSnapshots::CreateCheckpoint(
     std::unique_lock<std::mutex> lock(create_checkpoint_lock(), std::defer_lock);
     if (use_try_lock) {
       if (!lock.try_lock()) {
-        // tmp lo
-        LOG(INFO) << "INFO_A: [pid=" << getpid() << "] Unable to acquire checkpoint lock";
         return STATUS(InternalError, "Unable to acquire checkpoint lock");
       }
-      // tmp log
-      LOG(INFO) << "INFO_D: [pid=" << getpid() << "] Acquired checkpoint lock with try_lock";
     } else {
       lock.lock();
-      // tmp log
-      LOG(INFO) << "INFO_E: [pid=" << getpid() << "] Acquired checkpoint lock with lock";
     }
 
     if (!has_regular_db()) {
@@ -721,10 +715,10 @@ Status TabletSnapshots::CreateCheckpoint(
 
     // Test hook: sleep after acquiring lock to simulate long-running checkpoint operation.
     if (PREDICT_FALSE(FLAGS_TEST_sleep_seconds_in_create_checkpoint > 0)) {
-      LOG(INFO) << "INFO_B: [pid=" << getpid() << "] Sleeping for "
+      LOG(INFO) << "TEST: [" << getpid() << "-" << std::this_thread::get_id() << "] Sleeping for "
         << FLAGS_TEST_sleep_seconds_in_create_checkpoint << " seconds";
       SleepFor(MonoDelta::FromSeconds(FLAGS_TEST_sleep_seconds_in_create_checkpoint));
-      LOG(INFO) << "INFO_C: [pid=" << getpid() << "] Done sleeping";
+      LOG(INFO) << "TEST: [" << getpid() << "-" << std::this_thread::get_id() << "] Done sleeping";
     }
 
     // Order does not matter because we flush both DBs and does not have parallel writes.

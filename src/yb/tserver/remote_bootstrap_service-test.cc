@@ -449,7 +449,7 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
   // Now try to start a second session - it should fail to acquire the lock with try_lock.
   Status second_session_status = session2->InitBootstrapSession();
 
-  // Verify the second session failed with TryAgain status.
+  // Verify the second session failed with InternalError status.
   ASSERT_TRUE(second_session_status.IsInternalError())
       << "Expected InternalError status, got: " << second_session_status;
   ASSERT_STR_CONTAINS(second_session_status.ToString(),
@@ -515,8 +515,9 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_sleep_seconds_in_create_checkpoint) = 0;
 }
 
-// Test that when a BeginRemoteBootstrapSession RPC times out while holding the checkpoint lock,
-// the RPC returns a timeout status. This simulates the scenario where:
+// Test that when a BeginRemoteBootstrapSession RPC times out while holding
+// the checkpoint lock, the RPC returns a timeout status.
+// This simulates the scenario where:
 // 1. First RPC acquires checkpoint lock and takes longer than RPC timeout (sleeps)
 // 2. Client times out on first RPC
 // 3. Second RPC sent now fails to acquire the lock and returns RemoteError

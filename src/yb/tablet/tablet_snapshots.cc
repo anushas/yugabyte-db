@@ -73,7 +73,7 @@ DEFINE_test_flag(double, delay_create_snapshot_probability, 0.0,
     "The probability to delay creating snapshot by 1 second");
 
 DEFINE_test_flag(int32, sleep_seconds_in_create_checkpoint, 0,
-                 "Sleep for this many seconds after acquiring checkpoint lock in CreateCheckpoint.");
+    "Sleep for this many seconds after acquiring checkpoint lock in CreateCheckpoint.");
 
 namespace yb::tablet {
 
@@ -697,12 +697,15 @@ Status TabletSnapshots::CreateCheckpoint(
     std::unique_lock<std::mutex> lock(create_checkpoint_lock(), std::defer_lock);
     if (use_try_lock) {
       if (!lock.try_lock()) {
-        LOG(INFO) << "INFO_A: [pid=" << getpid() << "] Unable to acquire checkpoint lock, another checkpoint operation is in progress";
-        return STATUS(InternalError, "Unable to acquire checkpoint lock, another checkpoint operation is in progress");
+        // tmp lo
+        LOG(INFO) << "INFO_A: [pid=" << getpid() << "] Unable to acquire checkpoint lock";
+        return STATUS(InternalError, "Unable to acquire checkpoint lock");
       }
+      // tmp log
       LOG(INFO) << "INFO_D: [pid=" << getpid() << "] Acquired checkpoint lock with try_lock";
     } else {
       lock.lock();
+      // tmp log
       LOG(INFO) << "INFO_E: [pid=" << getpid() << "] Acquired checkpoint lock with lock";
     }
 
@@ -718,7 +721,8 @@ Status TabletSnapshots::CreateCheckpoint(
 
     // Test hook: sleep after acquiring lock to simulate long-running checkpoint operation.
     if (PREDICT_FALSE(FLAGS_TEST_sleep_seconds_in_create_checkpoint > 0)) {
-      LOG(INFO) << "INFO_B: [pid=" << getpid() << "] Sleeping for " << FLAGS_TEST_sleep_seconds_in_create_checkpoint << " seconds";
+      LOG(INFO) << "INFO_B: [pid=" << getpid() << "] Sleeping for "
+        << FLAGS_TEST_sleep_seconds_in_create_checkpoint << " seconds";
       SleepFor(MonoDelta::FromSeconds(FLAGS_TEST_sleep_seconds_in_create_checkpoint));
       LOG(INFO) << "INFO_C: [pid=" << getpid() << "] Done sleeping";
     }

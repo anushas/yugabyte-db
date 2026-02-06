@@ -412,11 +412,11 @@ TEST_F(RemoteBootstrapServiceTest, TestSessionTimeout) {
 }
 
 // Test that when a remote bootstrap session holds the checkpoint lock (via blocking lock),
-// a subsequent remote bootstrap session using try_lock fails to acquire the lock and returns TryAgain.
-// This simulates the scenario where:
+// a subsequent remote bootstrap session using try_lock fails to acquire the lock and returns
+// and error. This simulates the scenario where:
 // 1. First RPC acquires checkpoint lock and takes a long time (sleeps)
 // 2. Client times out on first RPC
-// 3. Second RPC is sent, uses try_lock, fails to acquire mutex, returns TryAgain
+// 3. Second RPC is sent, uses try_lock, fails to acquire mutex, returns error
 TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
   // Set test flag to sleep for 5 seconds after acquiring checkpoint lock.
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_sleep_seconds_in_create_checkpoint) = 5;
@@ -584,7 +584,8 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSRPCTimeoutWithCheckpointLock) {
   // Now the next RPC should succeed.
   BeginRemoteBootstrapSessionResponsePB resp3;
   RpcController controller3;
-  Status third_rpc_status = DoBeginRemoteBootstrapSession(GetTabletId(), GetLocalUUID(), &resp3, &controller3);
+  Status third_rpc_status = DoBeginRemoteBootstrapSession(
+      GetTabletId(), GetLocalUUID(), &resp3, &controller3);
   LOG(INFO) << "Third RPC status: " << third_rpc_status.ToString();
   ASSERT_OK(third_rpc_status);
 }

@@ -1336,8 +1336,6 @@ int64_t CountUpdateConsensusCalls(ExternalTabletServer* ets, const string& table
       "total_count"));
 }
 
-// TODO: fetching this metric crashes the yb-master and not used.
-// commenting for now.
 int32_t GetNumRBSessions(ExternalTabletServer* ets) {
   return CHECK_RESULT(ets->GetMetric<int32>(
       &METRIC_ENTITY_server,
@@ -1911,20 +1909,6 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   SleepFor(MonoDelta::FromSeconds(11));
   LOG(INFO) << "First RPC should have started by now";
 
-  /* TODO: fetching this metric crashes the yb-master, so commenting out for now.
-  [m-1] W0206 12:16:34.420151 1836249088 client-internal.cc:1637] GetTableSchemaRpc(
-  table_identifier: table_name: "xcluster_safe_time" namespace { name: "system" database_type:
-  YQL_DATABASE_CQL }, num_attempts: 1, check_only: 1) failed: Not found
-  (yb/master/catalog_manager.cc:6040): Table system.xcluster_safe_time not found:
-  OBJECT_NOT_FOUND (master error 3)
-*** Aborted at 1770408994 (unix time) try "date -d @1770408994" if you are using GNU date ***
-PC: @                0x0 _MergedGlobals.776
-*** SIGSEGV (@0x0) received by PID 81864 (TID 0x1fde8df00) stack trace: ***
-    @        0x18fdb8624 _sigtramp
-    @        0x1022e8b48 yb::ExternalDaemon::GetMetricFromHost<>()
-    ...
-    ...
-  */
   // Check that we have 1 active RBS session (the first one that started and is holding the lock).
   auto num_rbs_sessions = GetNumRBSessions(leader_tserver);
   auto rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);

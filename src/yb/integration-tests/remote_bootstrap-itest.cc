@@ -139,6 +139,7 @@ METRIC_DECLARE_counter(glog_info_messages);
 METRIC_DECLARE_counter(glog_warning_messages);
 METRIC_DECLARE_counter(glog_error_messages);
 METRIC_DECLARE_gauge_int32(num_remote_bootstrap_sessions_serving_data);
+METRIC_DECLARE_gauge_int64(rpc_inbound_calls_alive);
 
 namespace yb {
 
@@ -1333,9 +1334,9 @@ int64_t CountUpdateConsensusCalls(ExternalTabletServer* ets, const string& table
       &METRIC_handler_latency_yb_consensus_ConsensusService_UpdateConsensus,
       "total_count"));
 }
+
 // TODO: fetching this metric crashes the yb-master and not used.
 // commenting for now.
-/*
 int32_t GetNumRBSessions(ExternalTabletServer* ets) {
   return CHECK_RESULT(ets->GetMetric<int32>(
       &METRIC_ENTITY_server,
@@ -1343,7 +1344,15 @@ int32_t GetNumRBSessions(ExternalTabletServer* ets) {
       &METRIC_num_remote_bootstrap_sessions_serving_data,
       "value"));
 }
-*/
+
+int64_t GetRPCInboundCallsAlive(ExternalTabletServer *ets) {
+  return CHECK_RESULT(ets->GetMetric<int64>(
+    &METRIC_ENTITY_server,
+    "yb.tabletserver",
+    &METRIC_rpc_inbound_calls_alive,
+    "value"));
+}
+
 int64_t CountLogMessages(ExternalTabletServer* ets) {
   int64_t total = 0;
 
@@ -1913,33 +1922,40 @@ PC: @                0x0 _MergedGlobals.776
     @        0x1022e8b48 yb::ExternalDaemon::GetMetricFromHost<>()
     ...
     ...
+  */
   // Check that we have 1 active RBS session (the first one that started and is holding the lock).
   auto num_rbs_sessions = GetNumRBSessions(leader_tserver);
-  LOG(INFO) << "INFO_A: RBS sessions on leader (before timeout): " << num_rbs_sessions;
+  auto rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
+  LOG(INFO) << "INFO_A: RBS sessions on leader (before timeout): " << num_rbs_sessions
+    << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
   ASSERT_EQ(num_rbs_sessions, 1);
-  */
+  ASSERT_EQ(rpc_inbound_calls_alive, 1);
 
   // Wait for at least the RPC timeout (5 seconds) for the second attempt to start.
   LOG(INFO) << "INFO_A: Waiting for RPC timeout (5 seconds)";
   SleepFor(MonoDelta::FromSeconds(5));
   LOG(INFO) << "INFO_A: RPC timeout (5 seconds) should have passed by now";
 
-  /*
   // After the timeout, the first RPC's client side has timed out, but the server-side
   // thread is still active holding the checkpoint lock. Another attempt would be made,
   // which will start another thread, but it will finish quickly with failure. This will
   // repeat until the lock is released.
   // We should have at most 2 sessions at any given time during this period.
-  auto num_rbs_sessions = GetNumRBSessions(leader_tserver);
-  LOG(INFO) << "INFO_A: RBS sessions on leader (after timeout): " << num_rbs_sessions;
-  ASSERT_LE(num_rbs_sessions, 2);
+  num_rbs_sessions = GetNumRBSessions(leader_tserver);
+  rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
+  LOG(INFO) << "INFO_A: RBS sessions on leader (after timeout): " << num_rbs_sessions
+    << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
+  ASSERT_LE(rpc_inbound_calls_alive, 2);
+  ASSERT_GE(num_rbs_sessions, 2);
 
   // Wait a bit more and verify it never exceeds 2 until the lock is released.
   SleepFor(MonoDelta::FromSeconds(2));
   num_rbs_sessions = GetNumRBSessions(leader_tserver);
-  LOG(INFO) << "INFO_A: RBS sessions on leader (after additional wait): " << num_rbs_sessions;
-  ASSERT_LE(num_rbs_sessions, 2);
-  */
+  rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
+  LOG(INFO) << "INFO_A: RBS sessions on leader (after additional wait): " << num_rbs_sessions
+    << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
+  ASSERT_LE(rpc_inbound_calls_alive, 2);
+  ASSERT_GE(num_rbs_sessions, 2);
 
   // Reset the test flag so rest of the RPCs are regular (no sleep).
   ASSERT_OK(cluster_->SetFlag(leader_tserver,

@@ -70,6 +70,9 @@ DEFINE_test_flag(int32, delay_tablet_export_metadata_ms, 0,
 DEFINE_test_flag(double, delay_create_snapshot_probability, 0.0,
     "The probability to delay creating snapshot by 1 second");
 
+DEFINE_test_flag(int32, sleep_seconds_in_create_checkpoint, 0,
+    "Sleep for this many seconds after acquiring checkpoint lock in CreateCheckpoint.");
+
 namespace yb::tablet {
 
 namespace {
@@ -689,7 +692,9 @@ Status TabletSnapshots::CreateCheckpoint(
 
   Status status;
   {
+    LOG(INFO) << "TEST: [" << getpid() << "-" << std::this_thread::get_id() << "] checkpoint lock attempt ";
     std::lock_guard lock(create_checkpoint_lock());
+    LOG(INFO) << "TEST: [" << getpid() << "-" << std::this_thread::get_id() << "] checkpoint lock acquired ";
 
     if (!has_regular_db()) {
       LOG_WITH_PREFIX(INFO) << "Skipped creating checkpoint in " << dir;
@@ -697,6 +702,13 @@ Status TabletSnapshots::CreateCheckpoint(
                     "Tablet does not have a RocksDB (could be a transaction status tablet)");
     }
 
+    // Test hook: sleep after acquiring lock to simulate long-running checkpoint operation.
+    if (PREDICT_FALSE(FLAGS_TEST_sleep_seconds_in_create_checkpoint > 0)) {
+       LOG(INFO) << "TEST: [" << getpid() << "-" << std::this_thread::get_id() << "] Sleeping for "
+         << FLAGS_TEST_sleep_seconds_in_create_checkpoint << " seconds";
+       SleepFor(MonoDelta::FromSeconds(FLAGS_TEST_sleep_seconds_in_create_checkpoint));
+       LOG(INFO) << "TEST: [" << getpid() << "-" << std::this_thread::get_id() << "] Done sleeping";
+    }
     auto parent_dir = DirName(dir);
     RETURN_NOT_OK_PREPEND(metadata().fs_manager()->CreateDirIfMissing(parent_dir),
                           Format("Unable to create checkpoints directory $0", parent_dir));

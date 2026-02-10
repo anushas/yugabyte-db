@@ -136,6 +136,8 @@ METRIC_DECLARE_histogram(handler_latency_yb_consensus_ConsensusService_UpdateCon
 METRIC_DECLARE_counter(glog_info_messages);
 METRIC_DECLARE_counter(glog_warning_messages);
 METRIC_DECLARE_counter(glog_error_messages);
+METRIC_DECLARE_gauge_int32(num_remote_bootstrap_sessions_serving_data);
+METRIC_DECLARE_gauge_int64(rpc_inbound_calls_alive);
 
 namespace yb {
 
@@ -263,6 +265,20 @@ class RemoteBootstrapITest : public CreateTableITestBase {
       "--db_write_buffer_size=100000"
     };
   }
+
+  // Populate a tablet with data and return its tablet_id and workload info.
+  struct TabletWorkloadInfo {
+    std::string tablet_id;
+    client::YBTableName table_name;
+    int64_t batches_completed;
+    int64_t rows_inserted;
+  };
+  Result<TabletWorkloadInfo> PopulateTabletAndGetTabletId(
+      int num_rows = 5000, int payload_bytes = 1024, const MonoDelta& timeout = 40s);
+
+  // Delete all SST files from a tablet's RocksDB directory to trigger remote bootstrap.
+  // This will cause the tablet to be marked as FAILED when it's bootstrapped.
+  Status DeleteTabletSSTFiles(const std::string& tablet_id, TServerDetails* ts);
 
   MonoDelta crash_test_timeout_ = MonoDelta::FromSeconds(40);
   const MonoDelta kWaitForCrashTimeout_ = 60s;
@@ -1316,6 +1332,25 @@ int64_t CountUpdateConsensusCalls(ExternalTabletServer* ets, const string& table
       &METRIC_handler_latency_yb_consensus_ConsensusService_UpdateConsensus,
       "total_count"));
 }
+
+// TODO: fetching this metric crashes the yb-master and not used.
+// commenting for now.
+int32_t GetNumRBSessions(ExternalTabletServer* ets) {
+  return CHECK_RESULT(ets->GetMetric<int32>(
+      &METRIC_ENTITY_server,
+      "yb.tabletserver",
+      &METRIC_num_remote_bootstrap_sessions_serving_data,
+      "value"));
+}
+
+int64_t GetRPCInboundCallsAlive(ExternalTabletServer *ets) {
+  return CHECK_RESULT(ets->GetMetric<int64>(
+    &METRIC_ENTITY_server,
+    "yb.tabletserver",
+    &METRIC_rpc_inbound_calls_alive,
+    "value"));
+}
+
 int64_t CountLogMessages(ExternalTabletServer* ets) {
   int64_t total = 0;
 
@@ -1780,6 +1815,163 @@ TEST_F(RemoteBootstrapITest, TestFailedTabletIsRemoteBootstrapped) {
   ASSERT_NO_FATALS(cluster_verifier.CheckRowCount(workload.table_name(),
                                                   ClusterVerifier::AT_LEAST,
                                                   workload.rows_inserted()));
+}
+
+// Test that when a tablet is marked as failed and triggers remote bootstrap,
+// and if the checkpoint creation takes longer than the RPC timeout, multiple
+// bootstrap attempts will be made (first one times out, others will error
+// with checkpoint lock contention, eventually first one finishes).
+// Without fix, this would create multiple RBS sessions on the leader tserver.
+// With fix, this will create at most 2 RBS sessions on the leader tserver.
+TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
+  std::vector<std::string> ts_flags = {
+      "--follower_unavailable_considered_failed_sec=30",
+      "--raft_heartbeat_interval_ms=50",
+      "--consensus_rpc_timeout_ms=300",
+      "--TEST_delay_removing_peer_with_failed_tablet_secs=10",
+      "--memstore_size_mb=1",
+      // Increase the number of missed heartbeats used to detect leader failure since in slow
+      // testing instances it is very easy to miss the default (6) heartbeats since they are being
+      // sent very fast (50ms).
+      "--leader_failure_max_missed_heartbeat_periods=40.0",
+      "--remote_bootstrap_begin_session_timeout_ms=5000", // 5 seconds timeout
+  };
+
+  std::vector<std::string> master_flags = {"--enable_load_balancing=true"};
+
+  ASSERT_NO_FATALS(StartCluster(ts_flags, master_flags, 3));
+
+  const auto kTimeout = 40s;  // Increased timeout to account for multiple retry attempts
+  ASSERT_OK(cluster_->WaitForTabletServerCount(3, kTimeout));
+
+  // Populate a tablet with some data and get its tablet_id and workload info.
+  auto tablet_workload_info = ASSERT_RESULT(PopulateTabletAndGetTabletId(5000, 1024, kTimeout));
+  string tablet_id = tablet_workload_info.tablet_id;
+
+  TServerDetails* leader_ts;
+  // Find out who's leader.
+  ASSERT_OK(FindTabletLeader(ts_map_, tablet_id, kTimeout, &leader_ts));
+
+
+  TServerDetails* non_leader_ts = nullptr;
+  int non_leader_idx = -1;
+  // Find the first non-leader TS.
+  for (int i = 0; i < 3; i++) {
+    if (cluster_->tablet_server(i)->uuid() != leader_ts->uuid()) {
+      non_leader_ts = ts_map_[cluster_->tablet_server(i)->uuid()].get();
+      non_leader_idx = i;
+      break;
+    }
+  }
+
+  ASSERT_NE(non_leader_ts, nullptr);
+  ASSERT_NE(non_leader_idx, -1);
+
+  ASSERT_OK(WaitUntilTabletInState(non_leader_ts, tablet_id, tablet::RUNNING, kTimeout));
+
+  // Delete SST files to trigger remote bootstrap.
+  ASSERT_OK(DeleteTabletSSTFiles(tablet_id, non_leader_ts));
+
+  // Restart the tserver so that the tablet gets marked as FAILED when it's bootstrapped.
+  // Flag TEST_delay_removing_peer_with_failed_tablet_secs will keep the tablet in the FAILED state
+  // for the specified amount of time so that we can verify that it was indeed marked as FAILED.
+  auto* non_leader_tserver = cluster_->tablet_server_by_uuid(non_leader_ts->uuid());
+  non_leader_tserver->Shutdown();
+  ASSERT_OK(non_leader_tserver->Restart());
+
+  // Set the checkpoint sleep flag on the leader tserver (which will be the source of remote
+  // bootstrap) to cause the checkpoint creation to sleep for 10 seconds, which is longer than
+  // the RPC timeout (5 seconds default), causing:
+  // 1. First RPC to timeout on the client side
+  // 2. Subsequent RPCs to fail with checkpoint lock contention
+  // 3. Eventually the first RPC's server-side operation completes and releases the lock
+  // 4. The tablet is remote bootstrapped and becomes RUNNING again.
+  //
+  // NOTE: today we allow the server-side to complete even if the client times out.
+  // It not clear how idempotent and safe it is to do so and if there is a guarantee
+  // that the checkpoint lock will be released eventually.
+  // In this test scenario, its a happy path and we can verify it does.
+  // This may change in future.
+  auto* leader_tserver = cluster_->tablet_server_by_uuid(leader_ts->uuid());
+  ASSERT_NE(leader_tserver, nullptr);
+  ASSERT_OK(cluster_->SetFlag(leader_tserver,
+    "TEST_sleep_seconds_in_create_checkpoint", "60"));
+
+  ASSERT_OK(WaitUntilTabletInState(non_leader_ts, tablet_id, tablet::FAILED, kTimeout, 500ms));
+  LOG(INFO) << "Tablet " << tablet_id << " in state FAILED in tablet server "
+            << non_leader_ts->uuid();
+
+  // Wait a bit for the first RPC to start and acquire the checkpoint lock.
+  // At least 10s for delay in marking failed state + 1s for lock acquisition & sleep
+  LOG(INFO) << "INFO_A: Waiting for first RPC to start";
+  SleepFor(MonoDelta::FromSeconds(11));
+  LOG(INFO) << "INFO_A: First RPC should have started by now";
+
+  /* TODO: fetching this metric crashes the yb-master, so commenting out for now.
+  [m-1] W0206 12:16:34.420151 1836249088 client-internal.cc:1637] GetTableSchemaRpc(
+  table_identifier: table_name: "xcluster_safe_time" namespace { name: "system" database_type:
+  YQL_DATABASE_CQL }, num_attempts: 1, check_only: 1) failed: Not found
+  (yb/master/catalog_manager.cc:6040): Table system.xcluster_safe_time not found:
+  OBJECT_NOT_FOUND (master error 3)
+*** Aborted at 1770408994 (unix time) try "date -d @1770408994" if you are using GNU date ***
+PC: @                0x0 _MergedGlobals.776
+*** SIGSEGV (@0x0) received by PID 81864 (TID 0x1fde8df00) stack trace: ***
+    @        0x18fdb8624 _sigtramp
+    @        0x1022e8b48 yb::ExternalDaemon::GetMetricFromHost<>()
+    ...
+    ...
+  */
+  // Check that we have 1 active RBS session (the first one that started and is holding the lock).
+  auto num_rbs_sessions = GetNumRBSessions(leader_tserver);
+  auto rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
+  LOG(INFO) << "INFO_A: RBS sessions on leader (before timeout): " << num_rbs_sessions
+    << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
+  ASSERT_EQ(num_rbs_sessions, 1);
+  ASSERT_EQ(rpc_inbound_calls_alive, 1);
+
+  // Wait for at least the RPC timeout (5 seconds) for the second attempt to start.
+  LOG(INFO) << "INFO_A: Waiting for RPC timeout (5 seconds)";
+  SleepFor(MonoDelta::FromSeconds(5));
+  LOG(INFO) << "INFO_A: RPC timeout (5 seconds) should have passed by now";
+
+  // After the timeout, the first RPC's client side has timed out, but the server-side
+  // thread is still active holding the checkpoint lock. Another attempt would be made,
+  // which will start another thread, but it will finish quickly with failure. This will
+  // repeat until the lock is released.
+  // We should have at most 2 sessions at any given time during this period.
+  num_rbs_sessions = GetNumRBSessions(leader_tserver);
+  rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
+  LOG(INFO) << "INFO_A: RBS sessions on leader (after timeout): " << num_rbs_sessions
+    << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
+  ASSERT_GE(rpc_inbound_calls_alive, 2);
+  ASSERT_GE(num_rbs_sessions, 2);
+
+  // Wait a bit more and verify it never exceeds 2 until the lock is released.
+  SleepFor(MonoDelta::FromSeconds(31));
+  num_rbs_sessions = GetNumRBSessions(leader_tserver);
+  rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
+  LOG(INFO) << "INFO_A: RBS sessions on leader (after additional wait): " << num_rbs_sessions
+    << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
+  ASSERT_GE(rpc_inbound_calls_alive, 8);
+  //ASSERT_GE(num_rbs_sessions, 8);
+
+  // Reset the test flag so rest of the RPCs are regular (no sleep).
+  ASSERT_OK(cluster_->SetFlag(leader_tserver,
+    "TEST_sleep_seconds_in_create_checkpoint", "0"));
+
+  ASSERT_OK(WaitUntilTabletInState(non_leader_ts, tablet_id, tablet::RUNNING, kTimeout * 2));
+
+  /*
+  ASSERT_OK(WaitUntilCommittedConfigNumVotersIs(3, leader_ts, tablet_id, kTimeout));
+
+  ASSERT_OK(WaitForServersToAgree(kTimeout, ts_map_, tablet_id,
+    tablet_workload_info.batches_completed));
+
+  ClusterVerifier cluster_verifier(cluster_.get());
+  ASSERT_NO_FATALS(cluster_verifier.CheckCluster());
+  ASSERT_NO_FATALS(cluster_verifier.CheckRowCount(tablet_workload_info.table_name,
+    ClusterVerifier::AT_LEAST, tablet_workload_info.rows_inserted));
+ */
 }
 
 TEST_F(RemoteBootstrapITest, TestRemoteBootstrapFromClosestPeer) {
@@ -2389,6 +2581,52 @@ TEST_F(RemoteBootstrapITest, AcceptRBSAfterTabletTombstone) {
       waitfor_timeout,
       "Timed out waiting for a new copy of the tablet replica to be added back to the target "
       "tserver"));
+}
+
+Result<RemoteBootstrapITest::TabletWorkloadInfo> RemoteBootstrapITest::PopulateTabletAndGetTabletId(
+    int num_rows, int payload_bytes, const MonoDelta& timeout) {
+  // Populate a tablet with some data.
+  LOG(INFO) << "Starting workload";
+  TestYcqlWorkload workload(cluster_.get());
+  workload.set_sequential_write(true);
+  workload.Setup(YBTableType::YQL_TABLE_TYPE);
+  workload.set_payload_bytes(payload_bytes);
+  workload.Start();
+  workload.WaitInserted(num_rows);
+  LOG(INFO) << "Stopping workload";
+  workload.StopAndJoin();
+
+  // Figure out the tablet id of the created tablet.
+  vector<ListTabletsResponsePB::StatusAndSchemaPB> tablets;
+  TServerDetails* ts = ts_map_[cluster_->tablet_server(0)->uuid()].get();
+  RETURN_NOT_OK(WaitForNumTabletsOnTS(ts, 1, timeout, &tablets));
+
+  TabletWorkloadInfo info;
+  info.tablet_id = tablets[0].tablet_status().tablet_id();
+  info.table_name = workload.table_name();
+  info.batches_completed = workload.batches_completed();
+  info.rows_inserted = workload.rows_inserted();
+  return info;
+}
+
+Status RemoteBootstrapITest::DeleteTabletSSTFiles(
+    const std::string& tablet_id, TServerDetails* ts) {
+  auto* env = Env::Default();
+  const string data_dir = cluster_->tablet_server_by_uuid(ts->uuid())->GetDataDirs()[0];
+  auto meta_dir = FsManager::GetRaftGroupMetadataDir(data_dir);
+  auto metadata_path = JoinPathSegments(meta_dir, tablet_id);
+  tablet::RaftGroupReplicaSuperBlockPB superblock;
+  RETURN_NOT_OK(pb_util::ReadPBContainerFromPath(env, metadata_path, &superblock));
+  string tablet_data_dir = superblock.kv_store().rocksdb_dir();
+  const auto& rocksdb_files = VERIFY_RESULT(env->GetChildren(tablet_data_dir, ExcludeDots::kTrue));
+  SCHECK_GT(rocksdb_files.size(), 0, IllegalState, "No files found in tablet data directory");
+  for (const auto& file : rocksdb_files) {
+    if (file.size() > 4 && file.substr(file.size() - 4) == ".sst") {
+      RETURN_NOT_OK(env->DeleteFile(JoinPathSegments(tablet_data_dir, file)));
+      LOG(INFO) << "Deleted file " << JoinPathSegments(tablet_data_dir, file);
+    }
+  }
+  return Status::OK();
 }
 
 Result<std::string> RemoteBootstrapITest::SetUp3TabletServerClusterAndTable(

@@ -68,12 +68,11 @@ using std::vector;
 DECLARE_uint64(remote_bootstrap_idle_timeout_ms);
 DECLARE_uint64(remote_bootstrap_timeout_poll_period_ms);
 
-// Flag is defined in tablet_snapshots.cc
-DECLARE_int32(TEST_delay_create_checkpoint_sec);
-
 // Flags for test output
 DECLARE_int32(remote_bootstrap_begin_session_timeout_ms);
 DECLARE_int32(rbs_init_max_number_of_retries);
+
+DECLARE_int32(TEST_delay_create_checkpoint_sec);
 
 namespace yb {
 namespace tserver {
@@ -429,13 +428,10 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
             << FLAGS_TEST_delay_create_checkpoint_sec;
 
   // Create two sessions that will try to acquire the lock.
-  scoped_refptr<RemoteBootstrapSession> session1;
-  session1.reset(new RemoteBootstrapSession(
-      tablet_peer_, "TestSession1", "FakeUUID1", /*nsessions=*/nullptr));
-
-  scoped_refptr<RemoteBootstrapSession> session2;
-  session2.reset(new RemoteBootstrapSession(
-      tablet_peer_, "TestSession2", "FakeUUID2", /*nsessions=*/nullptr));
+  auto session1 = make_scoped_refptr<RemoteBootstrapSession>(
+      tablet_peer_, "TestSession1", "FakeUUID1", /*nsessions=*/nullptr);
+  auto session2 = make_scoped_refptr<RemoteBootstrapSession>(
+      tablet_peer_, "TestSession2", "FakeUUID2", /*nsessions=*/nullptr);
 
   // Start first session in a thread - it will acquire the lock and sleep.
   auto* first_session_ptr = session1.get();
@@ -444,7 +440,7 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
   });
 
   // Wait for first session to start and acquire the lock.
-  SleepFor(MonoDelta::FromMilliseconds(100));
+  SleepFor(MonoDelta::FromMilliseconds(500));
 
   // Now try to start a second session - it should fail to acquire the lock with try_lock.
   Status second_session_status = session2->InitBootstrapSession();
@@ -453,7 +449,7 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
   ASSERT_TRUE(second_session_status.IsInternalError())
       << "Expected InternalError status, got: " << second_session_status;
   ASSERT_STR_CONTAINS(second_session_status.ToString(),
-                      "Unable to acquire checkpoint lock");
+      "Unable to acquire checkpoint lock");
 
   // Wait for first session to complete and verify it succeeded.
   Status first_session_status = first_session_future.get();

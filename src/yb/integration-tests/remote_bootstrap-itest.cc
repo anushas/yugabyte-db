@@ -52,6 +52,7 @@
 #include "yb/fs/fs_manager.h"
 
 #include "yb/gutil/stl_util.h"
+#include "yb/rocksdb/db/filename.h"
 #include "yb/gutil/strings/substitute.h"
 
 #include "yb/integration-tests/cluster_itest_util.h"
@@ -270,17 +271,17 @@ class RemoteBootstrapITest : public CreateTableITestBase {
 
   // Populate a tablet with data and return its tablet_id and workload info.
   struct TabletWorkloadInfo {
-    std::string tablet_id;
+    TabletId tablet_id;
     client::YBTableName table_name;
     int64_t batches_completed;
     int64_t rows_inserted;
   };
   Result<TabletWorkloadInfo> PopulateTabletAndGetTabletId(
-      int num_rows = 5000, int payload_bytes = 1024, const MonoDelta& timeout = 40s);
+      int num_rows = 5000, size_t payload_bytes = 1024, const MonoDelta& timeout = 40s);
 
   // Delete all SST files from a tablet's RocksDB directory to trigger remote bootstrap.
   // This will cause the tablet to be marked as FAILED when it's bootstrapped.
-  Status DeleteTabletSSTFiles(const std::string& tablet_id, TServerDetails* ts);
+  Status DeleteTabletSSTFiles(const TabletId& tablet_id, TServerDetails* ts);
 
   MonoDelta crash_test_timeout_ = MonoDelta::FromSeconds(40);
   const MonoDelta kWaitForCrashTimeout_ = 60s;
@@ -1841,13 +1842,14 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
 
   std::vector<std::string> master_flags = {"--enable_load_balancing=true"};
 
-  ASSERT_NO_FATALS(StartCluster(ts_flags, master_flags, 3));
+  const size_t kNumTabletServers = 3;
+  ASSERT_NO_FATALS(StartCluster(ts_flags, master_flags, kNumTabletServers));
 
   const auto kTimeout = 40s;  // Increased timeout to account for multiple retry attempts
-  ASSERT_OK(cluster_->WaitForTabletServerCount(3, kTimeout));
+  ASSERT_OK(cluster_->WaitForTabletServerCount(kNumTabletServers, kTimeout));
 
   // Populate a tablet with some data and get its tablet_id and workload info.
-  auto tablet_workload_info = ASSERT_RESULT(PopulateTabletAndGetTabletId(5000, 1024, kTimeout));
+  auto tablet_workload_info = ASSERT_RESULT(PopulateTabletAndGetTabletId());
   string tablet_id = tablet_workload_info.tablet_id;
 
   TServerDetails* leader_ts;
@@ -1855,31 +1857,31 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   ASSERT_OK(FindTabletLeader(ts_map_, tablet_id, kTimeout, &leader_ts));
 
 
-  TServerDetails* non_leader_ts = nullptr;
-  int non_leader_idx = -1;
-  // Find the first non-leader TS.
-  for (int i = 0; i < 3; i++) {
+  TServerDetails* follower_ts = nullptr;
+  size_t follower_idx = kNumTabletServers + 1; // initially invalid
+  // Find the first follower TS.
+  for (size_t i = 0; i < kNumTabletServers; i++) {
     if (cluster_->tablet_server(i)->uuid() != leader_ts->uuid()) {
-      non_leader_ts = ts_map_[cluster_->tablet_server(i)->uuid()].get();
-      non_leader_idx = i;
+      follower_ts = ts_map_[cluster_->tablet_server(i)->uuid()].get();
+      follower_idx = i;
       break;
     }
   }
 
-  ASSERT_NE(non_leader_ts, nullptr);
-  ASSERT_NE(non_leader_idx, -1);
+  ASSERT_NE(follower_ts, nullptr);
+  ASSERT_NE(follower_idx, kNumTabletServers + 1);
 
-  ASSERT_OK(WaitUntilTabletInState(non_leader_ts, tablet_id, tablet::RUNNING, kTimeout));
+  ASSERT_OK(WaitUntilTabletInState(follower_ts, tablet_id, tablet::RUNNING, kTimeout));
 
   // Delete SST files to trigger remote bootstrap.
-  ASSERT_OK(DeleteTabletSSTFiles(tablet_id, non_leader_ts));
+  ASSERT_OK(DeleteTabletSSTFiles(tablet_id, follower_ts));
 
   // Restart the tserver so that the tablet gets marked as FAILED when it's bootstrapped.
   // Flag TEST_delay_removing_peer_with_failed_tablet_secs will keep the tablet in the FAILED state
   // for the specified amount of time so that we can verify that it was indeed marked as FAILED.
-  auto* non_leader_tserver = cluster_->tablet_server_by_uuid(non_leader_ts->uuid());
-  non_leader_tserver->Shutdown();
-  ASSERT_OK(non_leader_tserver->Restart());
+  auto* follower_tserver = cluster_->tablet_server_by_uuid(follower_ts->uuid());
+  follower_tserver->Shutdown();
+  ASSERT_OK(follower_tserver->Restart());
 
   // Set the checkpoint sleep flag on the leader tserver (which will be the source of remote
   // bootstrap) to cause the checkpoint creation to sleep for 10 seconds, which is longer than
@@ -1897,17 +1899,17 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   auto* leader_tserver = cluster_->tablet_server_by_uuid(leader_ts->uuid());
   ASSERT_NE(leader_tserver, nullptr);
   ASSERT_OK(cluster_->SetFlag(leader_tserver,
-    "TEST_sleep_seconds_in_create_checkpoint", "10"));
+    "TEST_delay_create_checkpoint_sec", "10"));
 
-  ASSERT_OK(WaitUntilTabletInState(non_leader_ts, tablet_id, tablet::FAILED, kTimeout, 500ms));
+  ASSERT_OK(WaitUntilTabletInState(follower_ts, tablet_id, tablet::FAILED, kTimeout, 500ms));
   LOG(INFO) << "Tablet " << tablet_id << " in state FAILED in tablet server "
-            << non_leader_ts->uuid();
+            << follower_ts->uuid();
 
   // Wait a bit for the first RPC to start and acquire the checkpoint lock.
   // At least 10s for delay in marking failed state + 1s for lock acquisition & sleep
-  LOG(INFO) << "INFO_A: Waiting for first RPC to start";
+  LOG(INFO) << "Waiting for first RPC to start";
   SleepFor(MonoDelta::FromSeconds(11));
-  LOG(INFO) << "INFO_A: First RPC should have started by now";
+  LOG(INFO) << "First RPC should have started by now";
 
   /* TODO: fetching this metric crashes the yb-master, so commenting out for now.
   [m-1] W0206 12:16:34.420151 1836249088 client-internal.cc:1637] GetTableSchemaRpc(
@@ -1926,15 +1928,15 @@ PC: @                0x0 _MergedGlobals.776
   // Check that we have 1 active RBS session (the first one that started and is holding the lock).
   auto num_rbs_sessions = GetNumRBSessions(leader_tserver);
   auto rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
-  LOG(INFO) << "INFO_A: RBS sessions on leader (before timeout): " << num_rbs_sessions
+  LOG(INFO) << "RBS sessions on leader (before timeout): " << num_rbs_sessions
     << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
   ASSERT_EQ(num_rbs_sessions, 1);
   ASSERT_EQ(rpc_inbound_calls_alive, 1);
 
   // Wait for at least the RPC timeout (5 seconds) for the second attempt to start.
-  LOG(INFO) << "INFO_A: Waiting for RPC timeout (5 seconds)";
+  LOG(INFO) << "Waiting for RPC timeout (5 seconds)";
   SleepFor(MonoDelta::FromSeconds(5));
-  LOG(INFO) << "INFO_A: RPC timeout (5 seconds) should have passed by now";
+  LOG(INFO) << "RPC timeout (5 seconds) should have passed by now";
 
   // After the timeout, the first RPC's client side has timed out, but the server-side
   // thread is still active holding the checkpoint lock. Another attempt would be made,
@@ -1943,7 +1945,7 @@ PC: @                0x0 _MergedGlobals.776
   // We should have at most 2 sessions at any given time during this period.
   num_rbs_sessions = GetNumRBSessions(leader_tserver);
   rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
-  LOG(INFO) << "INFO_A: RBS sessions on leader (after timeout): " << num_rbs_sessions
+  LOG(INFO) << "RBS sessions on leader (after timeout): " << num_rbs_sessions
     << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
   ASSERT_LE(rpc_inbound_calls_alive, 2);
   ASSERT_GE(num_rbs_sessions, 2);
@@ -1952,16 +1954,16 @@ PC: @                0x0 _MergedGlobals.776
   SleepFor(MonoDelta::FromSeconds(2));
   num_rbs_sessions = GetNumRBSessions(leader_tserver);
   rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
-  LOG(INFO) << "INFO_A: RBS sessions on leader (after additional wait): " << num_rbs_sessions
+  LOG(INFO) << "RBS sessions on leader (after additional wait): " << num_rbs_sessions
     << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
   ASSERT_LE(rpc_inbound_calls_alive, 2);
   ASSERT_GE(num_rbs_sessions, 2);
 
   // Reset the test flag so rest of the RPCs are regular (no sleep).
   ASSERT_OK(cluster_->SetFlag(leader_tserver,
-    "TEST_sleep_seconds_in_create_checkpoint", "0"));
+    "TEST_delay_create_checkpoint_sec", "0"));
 
-  ASSERT_OK(WaitUntilTabletInState(non_leader_ts, tablet_id, tablet::RUNNING, kTimeout * 2));
+  ASSERT_OK(WaitUntilTabletInState(follower_ts, tablet_id, tablet::RUNNING, kTimeout * 2));
 
   ASSERT_OK(WaitUntilCommittedConfigNumVotersIs(3, leader_ts, tablet_id, kTimeout));
 
@@ -2627,7 +2629,7 @@ TEST_F(RemoteBootstrapITest, TestFetchDataIsRetriedOnFailures) {
 }
 
 Result<RemoteBootstrapITest::TabletWorkloadInfo> RemoteBootstrapITest::PopulateTabletAndGetTabletId(
-    int num_rows, int payload_bytes, const MonoDelta& timeout) {
+    int num_rows, size_t payload_bytes, const MonoDelta& timeout) {
   // Populate a tablet with some data.
   LOG(INFO) << "Starting workload";
   TestYcqlWorkload workload(cluster_.get());
@@ -2655,7 +2657,7 @@ Result<RemoteBootstrapITest::TabletWorkloadInfo> RemoteBootstrapITest::PopulateT
 Status RemoteBootstrapITest::DeleteTabletSSTFiles(
     const std::string& tablet_id, TServerDetails* ts) {
   auto* env = Env::Default();
-  const string data_dir = cluster_->tablet_server_by_uuid(ts->uuid())->GetDataDirs()[0];
+  const auto data_dir = cluster_->tablet_server_by_uuid(ts->uuid())->GetDataDirs()[0];
   auto meta_dir = FsManager::GetRaftGroupMetadataDir(data_dir);
   auto metadata_path = JoinPathSegments(meta_dir, tablet_id);
   tablet::RaftGroupReplicaSuperBlockPB superblock;
@@ -2664,9 +2666,13 @@ Status RemoteBootstrapITest::DeleteTabletSSTFiles(
   const auto& rocksdb_files = VERIFY_RESULT(env->GetChildren(tablet_data_dir, ExcludeDots::kTrue));
   SCHECK_GT(rocksdb_files.size(), 0, IllegalState, "No files found in tablet data directory");
   for (const auto& file : rocksdb_files) {
-    if (file.size() > 4 && file.substr(file.size() - 4) == ".sst") {
-      RETURN_NOT_OK(env->DeleteFile(JoinPathSegments(tablet_data_dir, file)));
-      LOG(INFO) << "Deleted file " << JoinPathSegments(tablet_data_dir, file);
+    uint64_t number;
+    rocksdb::FileType type;
+    if (rocksdb::ParseFileName(file, &number, &type)) {
+      if (type == rocksdb::kTableFile) {
+        RETURN_NOT_OK(env->DeleteFile(JoinPathSegments(tablet_data_dir, file)));
+        LOG(INFO) << "INFO_A: Deleted file " << JoinPathSegments(tablet_data_dir, file);
+      }
     }
   }
   return Status::OK();

@@ -13,8 +13,6 @@
 
 #include "yb/tablet/tablet_snapshots.h"
 
-#include <unistd.h>
-
 #include <boost/algorithm/string/predicate.hpp>
 
 #include "yb/ash/wait_state.h"
@@ -72,7 +70,7 @@ DEFINE_test_flag(int32, delay_tablet_export_metadata_ms, 0,
 DEFINE_test_flag(double, delay_create_snapshot_probability, 0.0,
     "The probability to delay creating snapshot by 1 second");
 
-DEFINE_test_flag(int32, sleep_seconds_in_create_checkpoint, 0,
+DEFINE_test_flag(int32, delay_create_checkpoint_sec, 0,
     "Sleep for this many seconds after acquiring checkpoint lock in CreateCheckpoint.");
 
 namespace yb::tablet {
@@ -688,19 +686,18 @@ Status TabletSnapshots::Delete(const SnapshotOperation& operation) {
 }
 
 Status TabletSnapshots::CreateCheckpoint(
-    const std::string& dir, const CreateCheckpointIn create_checkpoint_in, bool use_try_lock) {
+    const std::string& dir, CreateCheckpointIn create_checkpoint_in,
+    TabletSnapshots::UseTryLock use_try_lock) {
   ScopedRWOperation scoped_read_operation(&pending_op_counter_blocking_rocksdb_shutdown_start());
   RETURN_NOT_OK(scoped_read_operation);
 
   Status status;
   {
-    std::unique_lock<std::mutex> lock(create_checkpoint_lock(), std::defer_lock);
-    if (use_try_lock) {
-      if (!lock.try_lock()) {
-        return STATUS(InternalError, "Unable to acquire checkpoint lock");
-      }
-    } else {
+    std::unique_lock lock(create_checkpoint_lock(), std::defer_lock);
+    if (!use_try_lock) {
       lock.lock();
+    } else if (!lock.try_lock()) {
+        return STATUS(InternalError, "Unable to acquire checkpoint lock");
     }
 
     if (!has_regular_db()) {
@@ -714,11 +711,11 @@ Status TabletSnapshots::CreateCheckpoint(
                           Format("Unable to create checkpoints directory $0", parent_dir));
 
     // Test hook: sleep after acquiring lock to simulate long-running checkpoint operation.
-    if (PREDICT_FALSE(FLAGS_TEST_sleep_seconds_in_create_checkpoint > 0)) {
-      LOG(INFO) << "TEST: [" << getpid() << "-" << std::this_thread::get_id() << "] Sleeping for "
-        << FLAGS_TEST_sleep_seconds_in_create_checkpoint << " seconds";
-      SleepFor(MonoDelta::FromSeconds(FLAGS_TEST_sleep_seconds_in_create_checkpoint));
-      LOG(INFO) << "TEST: [" << getpid() << "-" << std::this_thread::get_id() << "] Done sleeping";
+    if (PREDICT_FALSE(FLAGS_TEST_delay_create_checkpoint_sec > 0)) {
+      LOG(INFO) << "TEST: Create checkpoint sleeping for "
+        << FLAGS_TEST_delay_create_checkpoint_sec << " seconds";
+      SleepFor(MonoDelta::FromSeconds(FLAGS_TEST_delay_create_checkpoint_sec));
+      LOG(INFO) << "TEST: Create checkpoint done sleeping";
     }
 
     // Order does not matter because we flush both DBs and does not have parallel writes.

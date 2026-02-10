@@ -86,10 +86,11 @@ class TabletSnapshots : public TabletComponent {
   // cannot be acquired, the function will return early. Used for remote bootstrap to simulate
   // a long checkpoint.
   // In case of failure, the caller is responsible for cleanup.
+  YB_STRONGLY_TYPED_BOOL(UseTryLock);
   Status CreateCheckpoint(
       const std::string& dir,
       CreateCheckpointIn create_checkpoint_in = CreateCheckpointIn::kSubDir,
-      bool use_try_lock = false);
+      UseTryLock use_try_lock = UseTryLock::kFalse);
 
   // Returns the location of the last rocksdb checkpoint. Used for tests only.
   std::string TEST_LastRocksDBCheckpointDir() { return TEST_last_rocksdb_checkpoint_dir_; }

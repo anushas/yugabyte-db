@@ -69,7 +69,7 @@ DECLARE_uint64(remote_bootstrap_idle_timeout_ms);
 DECLARE_uint64(remote_bootstrap_timeout_poll_period_ms);
 
 // Flag is defined in tablet_snapshots.cc
-DECLARE_int32(TEST_sleep_seconds_in_create_checkpoint);
+DECLARE_int32(TEST_delay_create_checkpoint_sec);
 
 // Flags for test output
 DECLARE_int32(remote_bootstrap_begin_session_timeout_ms);
@@ -419,14 +419,14 @@ TEST_F(RemoteBootstrapServiceTest, TestSessionTimeout) {
 // 3. Second RPC is sent, uses try_lock, fails to acquire mutex, returns error
 TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
   // Set test flag to sleep for 5 seconds after acquiring checkpoint lock.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_sleep_seconds_in_create_checkpoint) = 5;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = 5;
 
   LOG(INFO) << "Test configuration: remote_bootstrap_begin_session_timeout_ms="
             << FLAGS_remote_bootstrap_begin_session_timeout_ms
             << ", rbs_init_max_number_of_retries="
             << FLAGS_rbs_init_max_number_of_retries
-            << ", TEST_sleep_seconds_in_create_checkpoint="
-            << FLAGS_TEST_sleep_seconds_in_create_checkpoint;
+            << ", TEST_delay_create_checkpoint_sec="
+            << FLAGS_TEST_delay_create_checkpoint_sec;
 
   // Create two sessions that will try to acquire the lock.
   scoped_refptr<RemoteBootstrapSession> session1;
@@ -460,7 +460,7 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
   ASSERT_OK(first_session_status);
 
   // Reset the test flag.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_sleep_seconds_in_create_checkpoint) = 0;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = 0;
 }
 
 // Test that when a BeginRemoteBootstrapSession RPC holds the checkpoint lock,
@@ -468,14 +468,14 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
 // This tests the RPC-level behavior when checkpoint lock contention occurs.
 TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
   // Set test flag to sleep for 5 seconds after acquiring checkpoint lock.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_sleep_seconds_in_create_checkpoint) = 5;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = 5;
 
   LOG(INFO) << "Test configuration: remote_bootstrap_begin_session_timeout_ms="
             << FLAGS_remote_bootstrap_begin_session_timeout_ms
             << ", rbs_init_max_number_of_retries="
             << FLAGS_rbs_init_max_number_of_retries
-            << ", TEST_sleep_seconds_in_create_checkpoint="
-            << FLAGS_TEST_sleep_seconds_in_create_checkpoint;
+            << ", TEST_delay_create_checkpoint_sec="
+            << FLAGS_TEST_delay_create_checkpoint_sec;
 
   // Start first RPC call in a separate thread - it will acquire the lock and sleep.
   // Use a longer timeout so the RPC doesn't timeout before the sleep completes.
@@ -512,7 +512,7 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
   ASSERT_OK(first_rpc_status);
 
   // Reset the test flag.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_sleep_seconds_in_create_checkpoint) = 0;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = 0;
 }
 
 // Test that when a BeginRemoteBootstrapSession RPC times out while holding
@@ -526,14 +526,14 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
 TEST_F(RemoteBootstrapServiceTest, TestBeginRBSRPCTimeoutWithCheckpointLock) {
   // Set test flag to sleep for 10 seconds after acquiring checkpoint lock.
   // This is longer than the 5 seconds RPC timeout used in DoBeginRemoteBootstrapSession.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_sleep_seconds_in_create_checkpoint) = 10;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = 10;
 
   LOG(INFO) << "Test configuration: remote_bootstrap_begin_session_timeout_ms="
             << FLAGS_remote_bootstrap_begin_session_timeout_ms
             << ", rbs_init_max_number_of_retries="
             << FLAGS_rbs_init_max_number_of_retries
-            << ", TEST_sleep_seconds_in_create_checkpoint="
-            << FLAGS_TEST_sleep_seconds_in_create_checkpoint
+            << ", TEST_delay_create_checkpoint_sec="
+            << FLAGS_TEST_delay_create_checkpoint_sec
             << ", RPC timeout in DoBeginRemoteBootstrapSession=1.0 seconds";
 
   // Start first RPC call - it will acquire the lock and sleep for 10 seconds,
@@ -553,7 +553,7 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSRPCTimeoutWithCheckpointLock) {
   ASSERT_STR_CONTAINS(first_rpc_status.ToString(), "Timed out");
 
   // Reset the test flag so rest of the RPCs are regular (no sleep).
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_sleep_seconds_in_create_checkpoint) = 0;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = 0;
 
   // Now try to make a second RPC call - it should either succeed (if lock was released)
   // or fail to acquire the lock (if lock is still held).

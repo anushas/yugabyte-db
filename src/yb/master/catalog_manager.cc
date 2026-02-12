@@ -821,8 +821,7 @@ void InitMasterFlags() {
       kAutoDetectNumShardsPerTServer) {
     const auto value = GetTransactionTableNumShardsPerTServer();
     VLOG(1) << "Auto setting FLAGS_transaction_table_num_tablets_per_tserver to " << value;
-    CHECK_OK(SET_FLAG_DEFAULT_AND_CURRENT(
-      transaction_table_num_tablets_per_tserver, value));
+    CHECK_OK(SET_FLAG_DEFAULT_AND_CURRENT(transaction_table_num_tablets_per_tserver, value));
   }
 }
 
@@ -5295,13 +5294,12 @@ Status CatalogManager::CreateTransactionStatusTableInternal(
      // When the local transaction status table is created, the number
      // of tables should be set based on the number of live tservers
      // in the placement info.
-     if ((tablespace_id) || (replication_info)) {
-       // Get the placement info from the tablespace or replication info.
-       const ReplicationInfoPB& placement_info =
-           VERIFY_RESULT(GetTableReplicationInfo(req.replication_info(), req.tablespace_id()));
-       auto live_tservers = VERIFY_RESULT(FindTServersForPlacementInfo(
-           placement_info.live_replicas(), GetAllLiveNotBlacklistedTServers()));
-       num_tablets =
+     if (tablespace_id || req.has_replication_info()) {
+      const ReplicationInfoPB& table_replication_info =
+        VERIFY_RESULT(GetTableReplicationInfo(req.replication_info(), req.tablespace_id()));
+      auto live_tservers = VERIFY_RESULT(FindTServersForPlacementInfo(
+        table_replication_info.live_replicas(), GetAllLiveNotBlacklistedTServers()));
+      num_tablets =
            narrow_cast<int>(live_tservers.size() * FLAGS_transaction_table_num_tablets_per_tserver);
      } else {
        auto placement_uuid =

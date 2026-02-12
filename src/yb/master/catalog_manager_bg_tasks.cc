@@ -53,12 +53,10 @@
 #include "yb/util/callsite_profiling.h"
 #include "yb/util/debug/long_operation_tracker.h"
 #include "yb/util/debug-util.h"
-#include "yb/util/flags.h"
 #include "yb/util/monotime.h"
 #include "yb/util/mutex.h"
 #include "yb/util/status_log.h"
 #include "yb/util/thread.h"
-#include "yb/util/tsan_util.h"
 
 using namespace std::literals;
 
@@ -72,7 +70,7 @@ METRIC_DEFINE_event_stats(
 DEFINE_RUNTIME_int32(catalog_manager_bg_task_wait_ms, 1000,
     "Amount of time the catalog manager background task thread waits between runs");
 
-DEFINE_RUNTIME_int32(transaction_status_check_interval_sec, 15*60,
+DEFINE_RUNTIME_int32(transaction_status_check_interval_sec, 15 * 60,
     "Interval in seconds for checking transaction status table partitions/tablets count.");
 TAG_FLAG(transaction_status_check_interval_sec, advanced);
 
@@ -97,15 +95,22 @@ DEFINE_test_flag(bool, pause_catalog_manager_bg_loop_start, false,
 DEFINE_test_flag(bool, pause_catalog_manager_bg_loop_end, false,
                  "Pause the bg tasks thread at the end of the loop.");
 
-DEFINE_test_flag(int32, transaction_status_check_run_count, 0,
-    "Test-only counter to track the transaction status check runs.");
-
 DECLARE_bool(enable_ysql);
 DECLARE_bool(TEST_echo_service_enabled);
 DECLARE_int32(transaction_table_num_tablets_per_tserver);
 DECLARE_int32(transaction_table_num_tablets);
 
 namespace yb::master {
+
+namespace {
+
+std::atomic<int32_t> test_transaction_status_check_run_count{0};
+
+}  // namespace
+
+int32_t TEST_transaction_status_check_run_count() {
+  return test_transaction_status_check_run_count.load(std::memory_order_relaxed);
+}
 
 CatalogManagerBgTasks::CatalogManagerBgTasks(Master* master)
     : closing_(false),
@@ -116,7 +121,7 @@ CatalogManagerBgTasks::CatalogManagerBgTasks(Master* master)
       catalog_manager_(master->catalog_manager_impl()),
       cluster_balancer_duration_(METRIC_load_balancer_duration.Instantiate(
           master_->metric_entity())),
-      last_transaction_status_check_time_(MonoTime::kUninitialized),
+      last_transaction_status_check_time_(CoarseTimePoint()),
       last_live_tservers_(0) {
 }
 
@@ -307,7 +312,9 @@ void CatalogManagerBgTasks::RunOnceAsLeader(const LeaderEpoch& epoch) {
   // Abort inactive YSQL BackendsCatalogVersionJob jobs.
   master_->ysql_backends_manager()->AbortInactiveJobs();
 
-  // Check transaction status table partitions/tablets count periodically.
+  // Periodically check if there are sufficient tablets
+  // in the transaction status table for the current
+  // cluster configuration. If not, add tablets.
   if (FLAGS_autoscale_transaction_tables) {
     CheckTransactionStatusTable(epoch);
   }
@@ -358,109 +365,113 @@ void CatalogManagerBgTasks::Run() {
   VLOG(1) << "Catalog manager background task thread shutting down";
 }
 
+Status CatalogManagerBgTasks::AddTabletsToTransactionStatusTable(
+    const TableInfoPtr& table, size_t tablets_to_add, bool is_global, const LeaderEpoch& epoch) {
+  const auto prefix = is_global ? "Global" : "Local";
+  for (size_t i = 1; i <= tablets_to_add; i++) {
+    AddTransactionStatusTabletRequestPB req;
+    AddTransactionStatusTabletResponsePB resp;
+    req.set_table_id(table->id());
+    RETURN_NOT_OK(catalog_manager_->AddTransactionStatusTablet(&req, &resp, nullptr, epoch));
+    VLOG(1) << prefix << " transaction status table check: Added " << i
+              << " tablet(s) to table " << table->name() << " (" << table->id() << ")";
+  }
+  return Status::OK();
+}
+
+Status CatalogManagerBgTasks::CheckAndAddTabletsIfNeeded(
+    const TableInfoPtr& table, size_t num_live_tservers,
+    const ReplicationInfoPB& repl_info, bool is_global, const LeaderEpoch& epoch) {
+  const auto prefix = is_global ? "Global" : "Local";
+  // Get actual number of tablets.
+  size_t num_tablets = table->TabletCount();
+
+  // Calculate expected number of tablets.
+  int flag_num_tablets = GetAtomicFlag(&FLAGS_transaction_table_num_tablets);
+  int flag_num_tablets_per_tserver =
+      GetAtomicFlag(&FLAGS_transaction_table_num_tablets_per_tserver);
+  size_t expected_tablets = (flag_num_tablets > 0)
+      ? flag_num_tablets
+      : (num_live_tservers * flag_num_tablets_per_tserver);
+
+  // Return if the number of tablets is sufficient. Otherwise, add tablets.
+  size_t tablets_to_add = expected_tablets - num_tablets;
+  if (tablets_to_add <= 0) {
+    return Status::OK();
+  }
+
+  LOG(INFO) << prefix << " transaction status table check: MISMATCH detected"
+      << ", table=" << table->name() << " (" << table->id() << ")"
+      << (is_global ? "" : ", cloud info: " + repl_info.ShortDebugString())
+      << ", tablets=" << num_tablets
+      << ", expected=" << expected_tablets
+      << " (num_tablets=" << flag_num_tablets
+      << " or (num_tservers=" << num_live_tservers
+      << " * tablets_per_tserver=" << flag_num_tablets_per_tserver << "))"
+      << ", num_tablets_per_tserver=" << (num_tablets / num_live_tservers);
+  LOG(INFO) << prefix << " transaction status table check: Adding "
+      << tablets_to_add << " tablets.";
+
+  return AddTabletsToTransactionStatusTable(table, tablets_to_add, is_global, epoch);
+}
+
 void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch) {
   auto interval_sec = GetAtomicFlag(&FLAGS_transaction_status_check_interval_sec);
   if (interval_sec <= 0) {
     return;  // Check is disabled
   }
 
-  auto now = MonoTime::Now();
-  if (last_transaction_status_check_time_.Initialized()) {
-    auto elapsed = now.GetDeltaSince(last_transaction_status_check_time_);
-    if (elapsed.ToSeconds() < interval_sec) {
+  auto now = CoarseMonoClock::Now();
+  if (last_transaction_status_check_time_ != CoarseTimePoint() &&
+    (now - last_transaction_status_check_time_) < std::chrono::seconds(interval_sec)) {
       return;  // Not time yet
-    }
   }
-
   last_transaction_status_check_time_ = now;
 
-  // Get number of live tservers
   size_t num_live_tservers = master_->ts_manager()->NumLiveDescriptors();
-
   if (last_live_tservers_ == num_live_tservers) {
     return;  // No change in number of live tservers, nothing to do
   }
 
   LOG(INFO) << "Number of live tservers changed from " << last_live_tservers_
-    << " to " << num_live_tservers;
+      << " to " << num_live_tservers;
 
   auto global_txn_table_result = catalog_manager_->GetGlobalTransactionStatusTable();
   if (!global_txn_table_result.ok()) {
-    LOG(WARNING) << "Failed to get global transaction status table: "
-                 << global_txn_table_result.status().ToString();
+    WARN_NOT_OK(global_txn_table_result, "Failed to get global transaction status table");
     return;
   }
-
   auto global_txn_table = *global_txn_table_result;
   if (!global_txn_table) {
     LOG(WARNING) << "Global transaction status table not found";
     return;
   }
 
-  // Get actual number of tablets
-  size_t num_tablets = global_txn_table->TabletCount();
-  size_t num_tablets_per_tserver = num_tablets / num_live_tservers;
-
-  // Calculate expected number of tablets
-  int flag_num_tablets = GetAtomicFlag(&FLAGS_transaction_table_num_tablets);
-  int flag_num_tablets_per_tserver
-    = GetAtomicFlag(&FLAGS_transaction_table_num_tablets_per_tserver);
-  size_t expected_tablets = (flag_num_tablets > 0) ? flag_num_tablets
-                              : (num_live_tservers * flag_num_tablets_per_tserver);
-
-  // Check if they match
-  bool tablets_match = (num_tablets >= expected_tablets);
-
-  if (!tablets_match) {
-    LOG(INFO) << "Global transaction status table check: MISMATCH"
-            << ", tablets=" << num_tablets
-            << ", expected=" << expected_tablets
-            << " (flag_num_tablets=" << flag_num_tablets
-            << " or (num_tservers=" << num_live_tservers
-            << " * tablets_per_tserver=" << flag_num_tablets_per_tserver << "))"
-            << ", num_tablets_per_tserver=" << num_tablets_per_tserver;
-    size_t tablets_to_add = expected_tablets - num_tablets;
-    // Add tablets to the transaction status table.
-    for (size_t i = 1; i <= tablets_to_add; i++) {
-      AddTransactionStatusTabletRequestPB req;
-      AddTransactionStatusTabletResponsePB resp;
-      req.set_table_id(global_txn_table->id());
-      Status s = catalog_manager_->AddTransactionStatusTablet(&req, &resp, nullptr, epoch);
-      WARN_NOT_OK(s, "Transaction status table check: Failed to add tablet to "
-          "transaction status table");
-      if (!s.ok()) {
-        return;  // Stop trying if we hit an error
-      }
-      VLOG(1) << "Global transaction status table check: Added " << i
-                << " tablet(s) to transaction status table";
-    }
+  auto s = CheckAndAddTabletsIfNeeded(
+      global_txn_table, num_live_tservers, ReplicationInfoPB(), /* is_global */ true, epoch);
+  if (!s.ok()) {
+    WARN_NOT_OK(s, "Global transaction status table check: Failed. Will retry in next iteration.");
+    return;
   }
 
-  // Check local transaction status tables
-  TableId global_txn_table_id = global_txn_table->id();
+  // Check local transaction status tables.
+  const TableId& global_txn_table_id = global_txn_table->id();
   CheckLocalTransactionStatusTables(epoch, global_txn_table_id);
 
   last_live_tservers_ = num_live_tservers;
   // Increment test counter to track that the task ran.
-  if (FLAGS_TEST_transaction_status_check_run_count >= 0) {
-    ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_transaction_status_check_run_count)
-      = FLAGS_TEST_transaction_status_check_run_count + 1;
-  }
+  test_transaction_status_check_run_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
     const LeaderEpoch& epoch, const TableId& global_txn_table_id) {
 
-  // Copy all the local transaction status tables and their placements
-  struct TableWithPlacement {
-    TableInfoPtr table;
-    yb::ReplicationInfoPB replication_info;
-  };
-  std::vector<TableWithPlacement> transaction_tables;
+  // Collect all the local transaction status tables and their placements.
+  std::vector<std::pair<TableInfoPtr, ReplicationInfoPB>> transaction_tables;
   {
     CatalogManager::SharedLock lock(catalog_manager_->mutex_);
     for (const auto& table_id : catalog_manager_->transaction_table_ids_set_) {
-      // Skip the global transaction status table
+      // Skip the global transaction status table.
       if (table_id == global_txn_table_id) {
         continue;
       }
@@ -472,78 +483,42 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
         continue;
       }
 
-      auto cloud_info = catalog_manager_->GetTableReplicationInfo(table);
-      if (!cloud_info.ok()) {
-        LOG(WARNING) << "Failed to get cloud info : " << cloud_info.status().ToString()
-                  << " - skipping table " << table->name()
-                  << " (" << table_id << ")";
+      auto repl_info = catalog_manager_->GetTableReplicationInfo(table);
+      if (!repl_info.ok()) {
+        WARN_NOT_OK(repl_info, Format("Failed to get cloud info - skipping table $0 ($1)",
+          table->name(), table_id));
         continue;
       }
 
-      transaction_tables.push_back({table, *cloud_info});
+      transaction_tables.push_back({table, *repl_info});
     }
   }
 
-  // Iterate through the local transaction status tables and their placements
-  for (const auto& table_with_placement : transaction_tables) {
-    const auto& table = table_with_placement.table;
-    const auto& cloud_info = table_with_placement.replication_info;
+  // For each of the local transaction status tables, verify if the number of tablets is sufficient.
+  // If not, add more tablets to the table.
+  for (const auto& [table, repl_info] : transaction_tables) {
 
     auto live_tservers_result = catalog_manager_->FindTServersForPlacementInfo(
-      cloud_info.live_replicas(), catalog_manager_->GetAllLiveNotBlacklistedTServers());
+      repl_info.live_replicas(), catalog_manager_->GetAllLiveNotBlacklistedTServers());
     if (!live_tservers_result.ok()) {
-      LOG(WARNING) << "Failed to find live tservers for placement info, "
-       << live_tservers_result.status().ToString()
-       << " - skipping table " << table->name()
-       << " (" << table->id() << ")";
+      WARN_NOT_OK(live_tservers_result, Format(
+        "Failed to find live tservers for placement info - skipping table $0 ($1)",
+        table->name(), table->id()));
       continue;
     }
     auto num_live_tservers = (*live_tservers_result).size();
     if (num_live_tservers == 0) {
-      LOG(WARNING) << "No live tservers for placement info :" << cloud_info.ShortDebugString()
+      LOG(WARNING) << "No live tservers for placement info :" << repl_info.ShortDebugString()
                     << " - skipping table " << table->name()
                     << " (" << table->id() << ")";
       continue;
     }
 
-    // Get actual number of tablets
-    size_t num_tablets = table->TabletCount();
-
-    // Calculate expected number of tablets
-    int flag_num_tablets = GetAtomicFlag(&FLAGS_transaction_table_num_tablets);
-    int flag_num_tablets_per_tserver
-        = GetAtomicFlag(&FLAGS_transaction_table_num_tablets_per_tserver);
-    size_t expected_tablets = (flag_num_tablets > 0)
-                                  ? flag_num_tablets
-                                  : (num_live_tservers * flag_num_tablets_per_tserver);
-
-    // Check if they match
-    bool tablets_match = (num_tablets >= expected_tablets);
-
-    if (!tablets_match) {
-      LOG(INFO) << "Local transaction status table check: MISMATCH"
-              << ", table=" << table->name() << " (" << table->id() << ") "
-              << ", cloud info: " << cloud_info.ShortDebugString()
-              << ", tablets=" << num_tablets
-              << ", expected=" << expected_tablets
-              << " (flag_num_tablets=" << flag_num_tablets
-              << " or (num_tservers=" << num_live_tservers
-              << " * tablets_per_tserver=" << flag_num_tablets_per_tserver << "))";
-      size_t tablets_to_add = expected_tablets - num_tablets;
-      // Add tablets to the transaction status table.
-      for (size_t i = 1; i <= tablets_to_add; i++) {
-        AddTransactionStatusTabletRequestPB req;
-        AddTransactionStatusTabletResponsePB resp;
-        req.set_table_id(table->id());
-        Status s = catalog_manager_->AddTransactionStatusTablet(&req, &resp, nullptr, epoch);
-        WARN_NOT_OK(s, "Local transaction status table check: Failed to add tablet to "
-                       "transaction status table");
-        if (!s.ok()) {
-          return;  // Stop trying if we hit an error
-        }
-        VLOG(1) << "Local transaction status table check: Added " << i
-                  << " tablet(s) to transaction status table " << table->id();
-      }
+    auto s = CheckAndAddTabletsIfNeeded(
+        table, num_live_tservers, repl_info, /* is_global */ false, epoch);
+    if (!s.ok()) {
+      WARN_NOT_OK(s, "Local transaction status table check: Failed. Will retry in next iteration.");
+      return;
     }
   }
 }

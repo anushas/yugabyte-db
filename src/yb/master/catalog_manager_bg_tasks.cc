@@ -34,7 +34,6 @@
 #include <memory>
 
 #include "yb/master/catalog_manager_util.h"
-#include "yb/gutil/sysinfo.h"
 
 #include "yb/master/catalog_entity_info.h"
 #include "yb/master/cdcsdk_manager.h"

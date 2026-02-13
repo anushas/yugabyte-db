@@ -14,16 +14,13 @@
 #include <gtest/gtest.h>
 
 #include "yb/client/client.h"
-#include "yb/yql/pgwrapper/pg_mini_test_base.h"
-
 #include "yb/master/catalog_manager.h"
 #include "yb/master/catalog_manager_bg_tasks.h"
 #include "yb/master/mini_master.h"
-
 #include "yb/tserver/mini_tablet_server.h"
-
 #include "yb/util/backoff_waiter.h"
 #include "yb/util/test_macros.h"
+#include "yb/yql/pgwrapper/pg_mini_test_base.h"
 
 using namespace std::chrono_literals;
 

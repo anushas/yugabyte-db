@@ -29,8 +29,10 @@
 #include "yb/tserver/tablet_server.h"
 
 #include "yb/util/backoff_waiter.h"
+#include "yb/util/countdown_latch.h"
 #include "yb/util/status_callback.h"
 #include "yb/util/test_macros.h"
+#include "yb/util/unique_lock.h"
 
 using namespace std::chrono_literals;
 

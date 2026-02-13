@@ -394,10 +394,11 @@ Status CatalogManagerBgTasks::CheckAndAddTabletsIfNeeded(
       : (num_live_tservers * flag_num_tablets_per_tserver);
 
   // Return if the number of tablets is sufficient. Otherwise, add tablets.
-  size_t tablets_to_add = expected_tablets - num_tablets;
-  if (tablets_to_add <= 0) {
+  if (num_tablets >= expected_tablets) {
     return Status::OK();
   }
+
+  size_t tablets_to_add = expected_tablets - num_tablets;
 
   LOG(INFO) << prefix << " transaction status table check: MISMATCH detected"
       << ", table=" << table->name() << " (" << table->id() << ")"

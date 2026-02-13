@@ -183,12 +183,12 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
 // periodically and logs expected info for local transaction status tables.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckBackgroundTask) {
   ASSERT_TRUE(FLAGS_autoscale_transaction_tables)
-    << "autoscale_transaction_tables must be enabled (default is true) for this test";
+      << "autoscale_transaction_tables must be enabled (default is true) for this test";
 
   // Set a short interval for the transaction status check (2 seconds)
   // to make the test faster.
-  int32_t original_transaction_status_check_interval_sec
-    = FLAGS_transaction_status_check_interval_sec;
+  int32_t original_transaction_status_check_interval_sec =
+      FLAGS_transaction_status_check_interval_sec;
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = 2;
 
   // Reset transaction_table_num_tablets to test auto scaling (up) of
@@ -198,29 +198,29 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckBackgroundTask) {
 
   // Set transaction_table_num_tablets_per_tserver to a known value
   // to make this test deterministic.
-  int32_t original_transaction_table_num_tablets_per_tserver
-    = FLAGS_transaction_table_num_tablets_per_tserver;
+  int32_t original_transaction_table_num_tablets_per_tserver =
+      FLAGS_transaction_table_num_tablets_per_tserver;
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver) = 2;
 
   // Enable auto_create_local_transaction_tables.
-  bool original_auto_create_local_transaction_tables
-    = FLAGS_auto_create_local_transaction_tables;
+  bool original_auto_create_local_transaction_tables =
+      FLAGS_auto_create_local_transaction_tables;
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_auto_create_local_transaction_tables) = true;
 
   // Enable name_transaction_tables_with_tablespace_id to make this
   // test deterministic.
-  bool original_name_transaction_tables_with_tablespace_id
-    = FLAGS_TEST_name_transaction_tables_with_tablespace_id;
+  bool original_name_transaction_tables_with_tablespace_id =
+      FLAGS_TEST_name_transaction_tables_with_tablespace_id;
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_name_transaction_tables_with_tablespace_id) = true;
 
   // Create a client to access the cluster.
   auto client = ASSERT_RESULT(cluster_->CreateClient());
 
   LOG(INFO) << "INFO_A: Initial cluster state:number of tablet servers: "
-    << cluster_->num_tablet_servers()
-    << ", replication factor: " << FLAGS_replication_factor
-    << ", " << FLAGS_TEST_check_broadcast_address
-    << ", " << FLAGS_enable_load_balancing;
+      << cluster_->num_tablet_servers()
+      << ", replication factor: " << FLAGS_replication_factor
+      << ", " << FLAGS_TEST_check_broadcast_address
+      << ", " << FLAGS_enable_load_balancing;
 
   // Test assumptions.
   ASSERT_EQ(cluster_->num_tablet_servers(), 1);
@@ -423,16 +423,16 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckBackgroundTask) {
       "Zone3"));
 
   // Restore the original flags.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec)
-    = original_transaction_status_check_interval_sec;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets)
-    = original_transaction_table_num_tablets;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver)
-    = original_transaction_table_num_tablets_per_tserver;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_auto_create_local_transaction_tables)
-    = original_auto_create_local_transaction_tables;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_name_transaction_tables_with_tablespace_id)
-    = original_name_transaction_tables_with_tablespace_id;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) =
+      original_transaction_status_check_interval_sec;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) =
+      original_transaction_table_num_tablets;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver) =
+      original_transaction_table_num_tablets_per_tserver;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_auto_create_local_transaction_tables) =
+      original_auto_create_local_transaction_tables;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_name_transaction_tables_with_tablespace_id) =
+      original_name_transaction_tables_with_tablespace_id;
 
 }
 

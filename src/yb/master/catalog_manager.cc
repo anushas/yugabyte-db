@@ -5291,24 +5291,24 @@ Status CatalogManager::CreateTransactionStatusTableInternal(
   if (FLAGS_transaction_table_num_tablets > 0) {
     num_tablets = FLAGS_transaction_table_num_tablets;
   } else {
-     // When the local transaction status table is created, the number
-     // of tables should be set based on the number of live tservers
-     // in the placement info.
-     if (tablespace_id || req.has_replication_info()) {
+    // When the local transaction status table is created, the number
+    // of tablets should be set based on the number of live tservers
+    // in the placement info.
+    if (tablespace_id || req.has_replication_info()) {
       const ReplicationInfoPB& table_replication_info =
-        VERIFY_RESULT(GetTableReplicationInfo(req.replication_info(), req.tablespace_id()));
+          VERIFY_RESULT(GetTableReplicationInfo(req.replication_info(), req.tablespace_id()));
       auto live_tservers = VERIFY_RESULT(FindTServersForPlacementInfo(
-        table_replication_info.live_replicas(), GetAllLiveNotBlacklistedTServers()));
-      num_tablets =
-           narrow_cast<int>(live_tservers.size() * FLAGS_transaction_table_num_tablets_per_tserver);
-     } else {
-       auto placement_uuid =
-           ClusterConfig()->LockForRead()->pb.replication_info().live_replicas().placement_uuid();
-       num_tablets = narrow_cast<int>(
-           GetNumLiveTServersForPlacement(placement_uuid) *
-           FLAGS_transaction_table_num_tablets_per_tserver);
-     }
-}
+          table_replication_info.live_replicas(), GetAllLiveNotBlacklistedTServers()));
+      num_tablets = narrow_cast<int>(
+          live_tservers.size() * FLAGS_transaction_table_num_tablets_per_tserver);
+    } else {
+      auto placement_uuid =
+          ClusterConfig()->LockForRead()->pb.replication_info().live_replicas().placement_uuid();
+      num_tablets = narrow_cast<int>(
+          GetNumLiveTServersForPlacement(placement_uuid) *
+          FLAGS_transaction_table_num_tablets_per_tserver);
+    }
+  }
 
   req.mutable_schema()->mutable_table_properties()->set_num_tablets(num_tablets);
 

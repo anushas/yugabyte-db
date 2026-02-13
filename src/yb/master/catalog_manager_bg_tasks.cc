@@ -374,7 +374,7 @@ Status CatalogManagerBgTasks::AddTabletsToTransactionStatusTable(
     req.set_table_id(table->id());
     RETURN_NOT_OK(catalog_manager_->AddTransactionStatusTablet(&req, &resp, nullptr, epoch));
     VLOG(1) << prefix << " transaction status table check: Added " << i
-              << " tablet(s) to table " << table->name() << " (" << table->id() << ")";
+            << " tablet(s) to table " << table->name() << " (" << table->id() << ")";
   }
   return Status::OK();
 }
@@ -423,8 +423,8 @@ void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch
 
   auto now = CoarseMonoClock::Now();
   if (last_transaction_status_check_time_ != CoarseTimePoint() &&
-    (now - last_transaction_status_check_time_) < std::chrono::seconds(interval_sec)) {
-      return;  // Not time yet
+      (now - last_transaction_status_check_time_) < std::chrono::seconds(interval_sec)) {
+    return;  // Not time yet
   }
   last_transaction_status_check_time_ = now;
 
@@ -485,8 +485,9 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
 
       auto repl_info = catalog_manager_->GetTableReplicationInfo(table);
       if (!repl_info.ok()) {
-        WARN_NOT_OK(repl_info, Format("Failed to get cloud info - skipping table $0 ($1)",
-          table->name(), table_id));
+        WARN_NOT_OK(repl_info, Format(
+            "Failed to get cloud info - skipping table $0 ($1)",
+            table->name(), table_id));
         continue;
       }
 
@@ -499,11 +500,11 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
   for (const auto& [table, repl_info] : transaction_tables) {
 
     auto live_tservers_result = catalog_manager_->FindTServersForPlacementInfo(
-      repl_info.live_replicas(), catalog_manager_->GetAllLiveNotBlacklistedTServers());
+        repl_info.live_replicas(), catalog_manager_->GetAllLiveNotBlacklistedTServers());
     if (!live_tservers_result.ok()) {
       WARN_NOT_OK(live_tservers_result, Format(
-        "Failed to find live tservers for placement info - skipping table $0 ($1)",
-        table->name(), table->id()));
+          "Failed to find live tservers for placement info - skipping table $0 ($1)",
+          table->name(), table->id()));
       continue;
     }
     auto num_live_tservers = (*live_tservers_result).size();

@@ -68,7 +68,6 @@ using std::vector;
 DECLARE_uint64(remote_bootstrap_idle_timeout_ms);
 DECLARE_uint64(remote_bootstrap_timeout_poll_period_ms);
 
-// Flags for test output
 DECLARE_int32(remote_bootstrap_begin_session_timeout_ms);
 DECLARE_int32(rbs_init_max_number_of_retries);
 
@@ -440,7 +439,7 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
   });
 
   // Wait for first session to start and acquire the lock.
-  SleepFor(MonoDelta::FromMilliseconds(500));
+  SleepFor(MonoDelta::FromSeconds(1));
 
   // Now try to start a second session - it should fail to acquire the lock with try_lock.
   Status second_session_status = session2->InitBootstrapSession();
@@ -522,7 +521,8 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
 TEST_F(RemoteBootstrapServiceTest, TestBeginRBSRPCTimeoutWithCheckpointLock) {
   // Set test flag to sleep for 10 seconds after acquiring checkpoint lock.
   // This is longer than the 5 seconds RPC timeout used in DoBeginRemoteBootstrapSession.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = 10;
+  auto kDelayCreateCheckpointSec = 10;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = kDelayCreateCheckpointSec;
 
   LOG(INFO) << "Test configuration: remote_bootstrap_begin_session_timeout_ms="
             << FLAGS_remote_bootstrap_begin_session_timeout_ms
@@ -561,7 +561,8 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSRPCTimeoutWithCheckpointLock) {
       GetTabletId(), GetLocalUUID(), &resp2, &controller2);
 
   LOG(INFO) << "Second RPC status after first RPC timed out: " << second_rpc_status.ToString();
-  if (first_rpc_start_time.GetDeltaSince(MonoTime::Now()).ToSeconds() < 10) {
+  if (first_rpc_start_time.GetDeltaSince(MonoTime::Now()).ToSeconds() <
+      FLAGS_TEST_delay_create_checkpoint_sec) {
     ASSERT_TRUE(second_rpc_status.IsRemoteError())
       << "Expected RemoteError status, got: " << second_rpc_status;
     ASSERT_STR_CONTAINS(second_rpc_status.ToString(), "Internal error");
@@ -571,12 +572,12 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSRPCTimeoutWithCheckpointLock) {
     ASSERT_OK(second_rpc_status);
   }
 
-  LOG(INFO) << "Sleeping for 10 seconds ";
   // Even though the client timed out, the RPC processing on the
   // server side is still asleep and holding the lock.
   // Wait to ensure it wakes up and completes the checkpoint
   // releasing the lock.
-  SleepFor(MonoDelta::FromSeconds(10));
+  LOG(INFO) << "Sleeping for " << kDelayCreateCheckpointSec << " seconds";
+  SleepFor(MonoDelta::FromSeconds(kDelayCreateCheckpointSec));
 
   // Now the next RPC should succeed.
   BeginRemoteBootstrapSessionResponsePB resp3;

@@ -405,9 +405,9 @@ Status CatalogManagerBgTasks::CheckAndAddTabletsIfNeeded(
       << (is_global ? "" : ", cloud info: " + repl_info.ShortDebugString())
       << ", tablets=" << num_tablets
       << ", expected=" << expected_tablets
-      << " (num_tablets=" << flag_num_tablets
-      << " or (num_tservers=" << num_live_tservers
-      << " * tablets_per_tserver=" << flag_num_tablets_per_tserver << "))"
+      << " (transaction_table_num_tablets=" << flag_num_tablets
+      << " or (num_live_tservers=" << num_live_tservers
+      << " * transaction_table_num_tablets_per_tserver=" << flag_num_tablets_per_tserver << "))"
       << ", num_tablets_per_tserver=" << (num_tablets / num_live_tservers);
   LOG(INFO) << prefix << " transaction status table check: Adding "
       << tablets_to_add << " tablets.";

@@ -19,6 +19,7 @@
 #include "yb/master/mini_master.h"
 #include "yb/tserver/mini_tablet_server.h"
 #include "yb/util/backoff_waiter.h"
+#include "yb/util/logging_test_util.h"
 #include "yb/util/test_macros.h"
 #include "yb/yql/pgwrapper/pg_mini_test_base.h"
 
@@ -47,9 +48,18 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
     ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_check_broadcast_address) = false;
     ANNOTATE_UNPROTECTED_WRITE(FLAGS_enable_load_balancing) = false;
     pgwrapper::PgMiniTestBase::SetUp();
+    LOG(INFO) << "MasterTxnStatusCheck SetUp: "
+        << "tservers: " << cluster_->num_tablet_servers()
+        << ", bgtask run count: " << master::TEST_transaction_status_check_run_count()
+        << ", flag:check_interval_sec: " << FLAGS_transaction_status_check_interval_sec
+        << ", flag:num_tablets: " << FLAGS_transaction_table_num_tablets
+        << ", flag:num_tablets_per_tserver: " << FLAGS_transaction_table_num_tablets_per_tserver
+        << ", flag:broadcast_address: " << FLAGS_TEST_check_broadcast_address
+        << ", flag:load_balancing: " << FLAGS_enable_load_balancing;
   }
 
  protected:
+  std::string mismatch_logline_ = "MISMATCH detected";
 
   // Helper to get tablespace OID from PostgreSQL.
   Result<uint32_t> GetTablespaceOid(const std::string& tablespace_name) {
@@ -101,14 +111,14 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
     // Get global transactions table info.
     auto table_id = VERIFY_RESULT(GetTableIDFromTableName("transactions"));
     auto global_table_info = VERIFY_RESULT(cm->FindTableById(table_id));
-    LOG(INFO) << "INFO_A: Global table info: " << global_table_info->name()
+    LOG(INFO) << "Global table info: " << global_table_info->name()
               << ", table ID: " << global_table_info->id()
               << ", tablets: " << global_table_info->TabletCount();
 
     // Get local transactions table info.
     table_id = VERIFY_RESULT(GetTableIDFromTableName(local_txnstatus_name));
     auto local_table_info = VERIFY_RESULT(cm->FindTableById(table_id));
-    LOG(INFO) << "INFO_A: Local Table info: " << local_table_info->name()
+    LOG(INFO) << "Local Table info: " << local_table_info->name()
               << ", table ID: " << local_table_info->id()
               << ", tablets: " << local_table_info->TabletCount();
 
@@ -134,7 +144,7 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
     size_t global_tablet_count = txn_tablets.global_tablets.size();
     size_t local_tablet_count = txn_tablets.region_local_tablets.size();
 
-    LOG(INFO) << "INFO_A: " << log_prefix << " Global tablet count: " << global_tablet_count
+    LOG(INFO) << "" << log_prefix << " Global tablet count: " << global_tablet_count
               << ", " << log_prefix << " Local tablet count: " << local_tablet_count;
 
     SCHECK_EQ(global_tablet_count, expected_global_tablets, IllegalState,
@@ -160,63 +170,169 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
         return false;
       }
       auto txn_tablets = *result;
-      LOG(INFO) << "INFO_A: global tablet count: " << txn_tablets.global_tablets.size()
+      LOG(INFO) << "global tablet count: " << txn_tablets.global_tablets.size()
                 << ", local tablet count: " << txn_tablets.region_local_tablets.size();
       return txn_tablets.global_tablets.size() == expected_global_tablets &&
              txn_tablets.region_local_tablets.size() == expected_local_tablets;
-    }, timeout, "INFO_A: Waiting for tablet server to finish creating tablets");
+    }, timeout, "Waiting for tablet server to finish creating tablets");
   }
 
   // Helper to sleep and verify background task run count.
   void WaitAndVerifyBackgroundTaskRuns(
-      int32_t expected_min_run_count,
+      int32_t expected_run_count,
       const std::string& tag = "") {
     SleepFor(MonoDelta::FromSeconds(FLAGS_transaction_status_check_interval_sec * 3 + 2));
     auto run_count = master::TEST_transaction_status_check_run_count();
-    ASSERT_GE(run_count, expected_min_run_count)
-      << tag << ": Background task should have run at least " << expected_min_run_count
+    ASSERT_EQ(run_count, expected_run_count)
+      << tag << ": Background task should have run " << expected_run_count
       << " times but got " << run_count;
+  }
+
+  std::string RebootTriggerLogline() {
+    return Format("Number of live tservers changed from 0 to $0",
+      cluster_->num_tablet_servers());
+  }
+
+  Status BackgroundTaskRunCountInc(int32_t prev_run_count) {
+    return WaitFor([&]() -> Result<bool> {
+      return master::TEST_transaction_status_check_run_count() > prev_run_count;
+    }, MonoDelta::FromSeconds(30), "Waiting for background task to trigger");
   }
 };
 
-// Test that the transaction status check background task runs
-// periodically and logs expected info for local transaction status tables.
-TEST_F(MasterTxnStatusCheck, TransactionStatusCheckBackgroundTask) {
+// Test that the transaction status check runs once after every boot.
+// It should have nothing to do when tserver/config did not change.
+TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootNoChange) {
+  // Create a log waiter to wait for the message that shows the check has triggered on boot.
+  StringWaiterLogSink log_sink(RebootTriggerLogline());
+  // Create a log waiter to wait for the mismatch message.
+  PatternWaiterLogSink<std::string> log_sink2(mismatch_logline_);
+
+  auto run_count_before = master::TEST_transaction_status_check_run_count();
+
+  // Restart the cluster.
+  ASSERT_OK(cluster_->RestartSync());
+
+  // Background task should trigger on every boot.
+  // But no action is taken since tserver/config did not change.
+  ASSERT_OK(BackgroundTaskRunCountInc(run_count_before));
+  // Trigger message should have been logged.
+  ASSERT_EQ(log_sink.GetEventCount(), 1);
+  // No mismatch message should have been logged.
+  ASSERT_EQ(log_sink2.GetEventCount(), 0);
+}
+
+// Test that the transaction status check does not take any action on scaling down.
+// It should trigger but do nothing.
+TEST_F(MasterTxnStatusCheck, TransactionStatusCheckNoActionOnScaleDown) {
+  // Create a log waiter to wait for the trigger message on reboot.
+  StringWaiterLogSink log_sink_scale_down(RebootTriggerLogline());
+  // Create a log waiter to wait for the mismatch message.
+  PatternWaiterLogSink<std::string> log_sink2(mismatch_logline_);
+  // Simulates scale down by rebooting with flag changes.
+  // Alternative: reduce the tserver count.
+  // Decrease the number of tablets flag to a smaller number.
+  int32_t original_transaction_table_num_tablets = FLAGS_transaction_table_num_tablets;
+  ASSERT_GT(original_transaction_table_num_tablets, 1); // setup assumption
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) =
+      original_transaction_table_num_tablets - 1;
+
+  // Decrease the check interval to 2 seconds.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = 2;
+  // Opportunitistically verify that flag changes do not trigger the background task.
+  auto run_count_before = master::TEST_transaction_status_check_run_count();
+  SleepFor(MonoDelta::FromSeconds(3*FLAGS_transaction_status_check_interval_sec + 2));
+  ASSERT_EQ(run_count_before, master::TEST_transaction_status_check_run_count());
+
+  // Restart the cluster.
+  ASSERT_OK(cluster_->RestartSync());
+  // Background task should trigger on reboot.
+  // But no action is taken since the number of tablets is more than the expected number.
+  ASSERT_OK(BackgroundTaskRunCountInc(run_count_before));
+  ASSERT_EQ(log_sink_scale_down.GetEventCount(), 1);
+  ASSERT_EQ(log_sink2.GetEventCount(), 0);
+}
+
+// Test that the transaction status check runs once after every boot.
+// It detects and takes action if there are new tservers.
+TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootTserverChange) {
+  // Needed to scaleup the number of tablets with tserver change.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) = 0;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver) = 2;
+
+  auto run_count_before = master::TEST_transaction_status_check_run_count();
+  // Add a new tserver.
+  auto ts_opts = ASSERT_RESULT(tserver::TabletServerOptions::CreateTabletServerOptions());
+  ts_opts.SetPlacement("test_cloud", "test_region", "zone2");
+  ASSERT_OK(cluster_->AddTabletServer(ts_opts, true));
+  ASSERT_OK(cluster_->WaitForTabletServerCount(2));
+
+  // Opportunitistically verify that the background task does not trigger if the elapsed time since
+  // the last check (on boot) is less than the check interval (default 900s).
+  SleepFor(MonoDelta::FromSeconds(10));
+  ASSERT_EQ(master::TEST_transaction_status_check_run_count(), run_count_before);
+
+  // Create log waiter for the trigger message on reboot.
+  StringWaiterLogSink log_sink_tserver_change(RebootTriggerLogline());
+  // Create a log waiter to wait for the mismatch message.
+  PatternWaiterLogSink<std::string> log_sink2(mismatch_logline_);
+
+  // Restart the cluster.
+  ASSERT_OK(cluster_->RestartSync());
+  ASSERT_OK(BackgroundTaskRunCountInc(run_count_before));
+  ASSERT_EQ(log_sink_tserver_change.GetEventCount(), 1);
+  ASSERT_EQ(log_sink2.GetEventCount(), 1);
+}
+
+// Test that the transaction status check runs once after every boot.
+// It detects and takes action if the relevant flags change.
+TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootFlagChange) {
+  // Create a log waiter to wait for the trigger message on reboot.
+  StringWaiterLogSink log_sink_scale_down(RebootTriggerLogline());
+  // Create a log waiter to wait for the mismatch message.
+  PatternWaiterLogSink<std::string> log_sink2(mismatch_logline_);
+
+  // Increase the number of tablets flag to a bigger number.
+  int32_t original_transaction_table_num_tablets = FLAGS_transaction_table_num_tablets;
+  ASSERT_GE(original_transaction_table_num_tablets, 1); // setup assumption
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) =
+      original_transaction_table_num_tablets + 1;
+
+  // Decrease the check interval to 2 seconds.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = 2;
+  // Opportunitistically verify that flag changes do not trigger the background task.
+  auto run_count_before = master::TEST_transaction_status_check_run_count();
+  SleepFor(MonoDelta::FromSeconds(3*FLAGS_transaction_status_check_interval_sec + 2));
+  ASSERT_EQ(run_count_before, master::TEST_transaction_status_check_run_count());
+
+  // Restart the cluster.
+  ASSERT_OK(cluster_->RestartSync());
+  // Background task should trigger on boot and take action.
+  ASSERT_OK(BackgroundTaskRunCountInc(run_count_before));
+  ASSERT_EQ(log_sink_scale_down.GetEventCount(), 1);
+  ASSERT_EQ(log_sink2.GetEventCount(), 1);
+}
+
+// Test auto scaling of transaction status tables at runtime.
+TEST_F(MasterTxnStatusCheck, TransactionStatusCheckAutoScale) {
   ASSERT_TRUE(FLAGS_autoscale_transaction_tables)
       << "autoscale_transaction_tables must be enabled (default is true) for this test";
 
-  // Set a short interval for the transaction status check (2 seconds)
-  // to make the test faster.
-  int32_t original_transaction_status_check_interval_sec =
-      FLAGS_transaction_status_check_interval_sec;
+  // Decrease the transaction status check interval to 2 seconds
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = 2;
-
-  // Reset transaction_table_num_tablets to test auto scaling (up) of
-  // transaction status tables.
-  int32_t original_transaction_table_num_tablets = FLAGS_transaction_table_num_tablets;
+  // Reset transaction_table_num_tablets to test auto scaling (up) with tserver changes.
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) = 0;
-
-  // Set transaction_table_num_tablets_per_tserver to a known value
-  // to make this test deterministic.
-  int32_t original_transaction_table_num_tablets_per_tserver =
-      FLAGS_transaction_table_num_tablets_per_tserver;
+  // Set transaction_table_num_tablets_per_tserver to a fixed value for deterministic test.
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver) = 2;
-
   // Enable auto_create_local_transaction_tables.
-  bool original_auto_create_local_transaction_tables =
-      FLAGS_auto_create_local_transaction_tables;
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_auto_create_local_transaction_tables) = true;
-
-  // Enable name_transaction_tables_with_tablespace_id to make this
-  // test deterministic.
-  bool original_name_transaction_tables_with_tablespace_id =
-      FLAGS_TEST_name_transaction_tables_with_tablespace_id;
+  // Enable name_transaction_tables_with_tablespace_id for deterministic test.
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_name_transaction_tables_with_tablespace_id) = true;
 
   // Create a client to access the cluster.
   auto client = ASSERT_RESULT(cluster_->CreateClient());
 
-  LOG(INFO) << "INFO_A: Initial cluster state:number of tablet servers: "
+  LOG(INFO) << "Initial cluster state:number of tablet servers: "
       << cluster_->num_tablet_servers()
       << ", replication factor: " << FLAGS_replication_factor
       << ", " << FLAGS_TEST_check_broadcast_address
@@ -250,7 +366,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckBackgroundTask) {
   initial_cloud_info.set_placement_region(initial_region);
   initial_cloud_info.set_placement_zone(initial_zone);
 
-  LOG(INFO) << "INFO_A: Initial cloud: " << initial_cloud
+  LOG(INFO) << "Initial cloud: " << initial_cloud
             << ", Initial region: " << initial_region
             << ", Initial zone: " << initial_zone
             << ", Global transactions Table ID: " << GetTableIDFromTableName("transactions");
@@ -289,7 +405,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckBackgroundTask) {
 
   std::string local_txnstatus_name  = "transactions_" + std::to_string(tablespace_oid);
   // Find the name of the transaction status table that was created.
-  LOG(INFO) << "INFO_A: Local transaction status table created "
+  LOG(INFO) << "Local transaction status table created "
             << local_txnstatus_name << "[ "
             << GetTableIDFromTableName(local_txnstatus_name) << "]";
 
@@ -421,18 +537,6 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckBackgroundTask) {
       cluster_->num_tablet_servers() * FLAGS_transaction_table_num_tablets_per_tserver,
       0,
       "Zone3"));
-
-  // Restore the original flags.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) =
-      original_transaction_status_check_interval_sec;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) =
-      original_transaction_table_num_tablets;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver) =
-      original_transaction_table_num_tablets_per_tserver;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_auto_create_local_transaction_tables) =
-      original_auto_create_local_transaction_tables;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_name_transaction_tables_with_tablespace_id) =
-      original_name_transaction_tables_with_tablespace_id;
 
 }
 

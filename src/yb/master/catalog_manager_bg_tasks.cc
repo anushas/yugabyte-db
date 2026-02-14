@@ -33,21 +33,19 @@
 
 #include <memory>
 
-#include "yb/master/catalog_manager_util.h"
-
 #include "yb/master/catalog_entity_info.h"
+#include "yb/master/catalog_manager_util.h"
 #include "yb/master/cdcsdk_manager.h"
 #include "yb/master/clone/clone_state_manager.h"
 #include "yb/master/cluster_balance.h"
 #include "yb/master/master.h"
 #include "yb/master/master_admin.pb.h"
+#include "yb/master/scoped_leader_shared_lock.h"
 #include "yb/master/tablet_split_manager.h"
 #include "yb/master/ts_manager.h"
 #include "yb/master/xcluster/xcluster_manager_if.h"
 #include "yb/master/ysql/ysql_manager.h"
 #include "yb/master/ysql_backends_manager.h"
-
-#include "yb/master/scoped_leader_shared_lock.h"
 
 #include "yb/util/callsite_profiling.h"
 #include "yb/util/debug/long_operation_tracker.h"
@@ -103,12 +101,12 @@ namespace yb::master {
 
 namespace {
 
-std::atomic<int32_t> test_transaction_status_check_run_count{0};
+std::atomic<int32_t> TEST_transaction_status_check_run_counter{0};
 
 }  // namespace
 
 int32_t TEST_transaction_status_check_run_count() {
-  return test_transaction_status_check_run_count.load(std::memory_order_relaxed);
+  return TEST_transaction_status_check_run_counter.load(std::memory_order_relaxed);
 }
 
 CatalogManagerBgTasks::CatalogManagerBgTasks(Master* master)
@@ -120,7 +118,7 @@ CatalogManagerBgTasks::CatalogManagerBgTasks(Master* master)
       catalog_manager_(master->catalog_manager_impl()),
       cluster_balancer_duration_(METRIC_load_balancer_duration.Instantiate(
           master_->metric_entity())),
-      last_transaction_status_check_time_(CoarseTimePoint()),
+      last_transaction_status_check_time_(),
       last_live_tservers_(0) {
 }
 
@@ -311,9 +309,8 @@ void CatalogManagerBgTasks::RunOnceAsLeader(const LeaderEpoch& epoch) {
   // Abort inactive YSQL BackendsCatalogVersionJob jobs.
   master_->ysql_backends_manager()->AbortInactiveJobs();
 
-  // Periodically check if there are sufficient tablets
-  // in the transaction status table for the current
-  // cluster configuration. If not, add tablets.
+  // Periodically check if there are sufficient tablets in the transaction status table for the
+  // current cluster configuration. If not, add tablets.
   if (FLAGS_autoscale_transaction_tables) {
     CheckTransactionStatusTable(epoch);
   }
@@ -386,12 +383,11 @@ Status CatalogManagerBgTasks::CheckAndAddTabletsIfNeeded(
   size_t num_tablets = table->TabletCount();
 
   // Calculate expected number of tablets.
-  int flag_num_tablets = GetAtomicFlag(&FLAGS_transaction_table_num_tablets);
-  int flag_num_tablets_per_tserver =
-      GetAtomicFlag(&FLAGS_transaction_table_num_tablets_per_tserver);
-  size_t expected_tablets = (flag_num_tablets > 0)
-      ? flag_num_tablets
-      : (num_live_tservers * flag_num_tablets_per_tserver);
+  auto flag_num_tablets = FLAGS_transaction_table_num_tablets;
+  auto flag_num_tablets_per_tserver = FLAGS_transaction_table_num_tablets_per_tserver;
+  size_t expected_tablets =
+      (flag_num_tablets > 0) ? flag_num_tablets
+                             : (num_live_tservers * flag_num_tablets_per_tserver);
 
   // Return if the number of tablets is sufficient. Otherwise, add tablets.
   if (num_tablets >= expected_tablets) {
@@ -416,14 +412,13 @@ Status CatalogManagerBgTasks::CheckAndAddTabletsIfNeeded(
 }
 
 void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch) {
-  auto interval_sec = GetAtomicFlag(&FLAGS_transaction_status_check_interval_sec);
+  auto interval_sec = FLAGS_transaction_status_check_interval_sec;
   if (interval_sec <= 0) {
     return;  // Check is disabled
   }
 
   auto now = CoarseMonoClock::Now();
-  if (last_transaction_status_check_time_ != CoarseTimePoint() &&
-      (now - last_transaction_status_check_time_) < std::chrono::seconds(interval_sec)) {
+  if ((now - last_transaction_status_check_time_) < std::chrono::seconds(interval_sec)) {
     return;  // Not time yet
   }
   last_transaction_status_check_time_ = now;
@@ -454,13 +449,11 @@ void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch
     return;
   }
 
-  // Check local transaction status tables.
   const TableId& global_txn_table_id = global_txn_table->id();
   CheckLocalTransactionStatusTables(epoch, global_txn_table_id);
 
   last_live_tservers_ = num_live_tservers;
-  // Increment test counter to track that the task ran.
-  test_transaction_status_check_run_count.fetch_add(1, std::memory_order_relaxed);
+  TEST_transaction_status_check_run_counter.fetch_add(1, std::memory_order_relaxed);
 }
 
 void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
@@ -477,9 +470,9 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
       }
 
       auto table = catalog_manager_->tables_->FindTableOrNull(table_id);
-      if (table == nullptr) {
-        LOG(DFATAL) << "Table " << table->name() << " (" << table_id << ") "
-                    << " in transaction_table_ids_set_ but not in table_ids_map_";
+      if (!table) {
+        LOG(DFATAL) << "Table " << table_id
+            << " in transaction_table_ids_set_ but not in table_ids_map_";
         continue;
       }
 

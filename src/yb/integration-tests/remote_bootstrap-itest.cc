@@ -1823,11 +1823,12 @@ TEST_F(RemoteBootstrapITest, TestFailedTabletIsRemoteBootstrapped) {
 // and if the checkpoint creation takes longer than the RPC timeout, multiple
 // bootstrap attempts will be made (first one times out, others will error
 // with checkpoint lock contention, eventually first one finishes).
-// Without fix, this would create multiple RBS sessions on the leader tserver.
-// With fix, this will create at most 2 RBS sessions on the leader tserver.
+// Without fix, this would create multiple stuck RBS RPC threads on the leader tserver.
+// With fix, this will create at most 2 RBS RPC threads on the leader tserver.
 TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   const auto kDelayRemovingPeerSecs = 10;
   const auto kRBSSessionTimeoutMs = 5000;
+  const auto kDelayCreateCheckpointSecs = 10;
 
   std::vector<std::string> ts_flags = {
       "--follower_unavailable_considered_failed_sec=30",
@@ -1895,19 +1896,20 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   // In this test scenario, its a happy path and we can verify it does.
   // This may change in future.
   auto* leader_tserver = ASSERT_NOTNULL(cluster_->tablet_server_by_uuid(leader_ts->uuid()));
-  ASSERT_OK(cluster_->SetFlag(leader_tserver, "TEST_delay_create_checkpoint_sec", "10"));
+  ASSERT_OK(cluster_->SetFlag(leader_tserver, "TEST_delay_create_checkpoint_sec",
+      Format("$0", kDelayCreateCheckpointSecs)));
 
   ASSERT_OK(WaitUntilTabletInState(follower_ts, tablet_id, tablet::FAILED, kTimeout, 500ms));
   LOG(INFO) << "Tablet " << tablet_id << " in state FAILED in tablet server "
             << follower_ts->uuid();
 
-  // Wait a bit for the first RPC to start and acquire the checkpoint lock.
-  // At least kDelayRemovingPeerSecs for delay in marking failed state + 1s for buffer.
-  LOG(INFO) << "Waiting for first RPC to start";
-  SleepFor(MonoDelta::FromSeconds(kDelayRemovingPeerSecs + 1));
-  LOG(INFO) << "First RPC should have started by now";
+  // Wait for the first RPC to start and acquire the checkpoint lock on the leader.
+  LogWaiter checkpoint_log_waiter(leader_tserver, "TEST: Create checkpoint sleeping for");
+  ASSERT_OK(checkpoint_log_waiter.WaitFor(MonoDelta::FromSeconds(kDelayRemovingPeerSecs + 10)));
+  LOG(INFO) << "First RPC has acquired the checkpoint lock";
 
-  // Check that we have 1 active RBS session (the first one that started and is holding the lock).
+  // Check that we have 1 active RPC thread and 1 active RBS session.
+  // On behalf of the first RBS RPC request that is holding the lock.
   auto num_rbs_sessions = GetNumRBSessions(leader_tserver);
   auto rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
   LOG(INFO) << "RBS sessions on leader (before timeout): " << num_rbs_sessions
@@ -1915,10 +1917,10 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   ASSERT_EQ(num_rbs_sessions, 1);
   ASSERT_EQ(rpc_inbound_calls_alive, 1);
 
-  // Wait for at least the RPC timeout for the second attempt to start.
-  LOG(INFO) << "Waiting for RPC timeout (" << kRBSSessionTimeoutMs << "ms)";
-  SleepFor(MonoDelta::FromMilliseconds(kRBSSessionTimeoutMs));
-  LOG(INFO) << "RPC timeout should have passed by now";
+  // Wait for the first RPC to timeout on the follower, triggering a second attempt.
+  LogWaiter rpc_timeout_log_waiter(follower_tserver, "Start remote bootstrap failed: Timed out");
+  ASSERT_OK(rpc_timeout_log_waiter.WaitFor(MonoDelta::FromMilliseconds(kRBSSessionTimeoutMs+1000)));
+  LOG(INFO) << "First RPC has timed out on the follower";
 
   // After the timeout, the first RPC's client side has timed out, but the server-side
   // thread is still active holding the checkpoint lock. Another attempt would be made,
@@ -1933,11 +1935,12 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   ASSERT_GE(num_rbs_sessions, 2);
 
   // Wait a bit more and verify it never exceeds 2 until the lock is released.
-  SleepFor(MonoDelta::FromMilliseconds(kRBSSessionTimeoutMs / 2));
+  auto remainingTime = (kDelayCreateCheckpointSecs*1000 - kRBSSessionTimeoutMs);
+  SleepFor(MonoDelta::FromMilliseconds(remainingTime/2));
   num_rbs_sessions = GetNumRBSessions(leader_tserver);
   rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
-  LOG(INFO) << "RBS sessions on leader (after additional wait): " << num_rbs_sessions
-            << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
+  LOG(INFO) << "RBS sessions on leader (after additional " << remainingTime/2 << "ms wait): "
+            << num_rbs_sessions << " rpc threads: " << rpc_inbound_calls_alive;
   ASSERT_LE(rpc_inbound_calls_alive, 2);
   ASSERT_GE(num_rbs_sessions, 2);
 

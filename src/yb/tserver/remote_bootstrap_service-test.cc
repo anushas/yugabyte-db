@@ -55,6 +55,7 @@
 
 #include "yb/util/crc.h"
 #include "yb/util/env_util.h"
+#include "yb/util/logging_test_util.h"
 #include "yb/util/monotime.h"
 #include "yb/util/stopwatch.h"
 #include "yb/util/test_util.h"
@@ -432,14 +433,17 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
   auto session2 = make_scoped_refptr<RemoteBootstrapSession>(
       tablet_peer_, "TestSession2", "FakeUUID2", /*nsessions=*/nullptr);
 
+  // Set up log waiter to detect when first session acquires the lock and starts sleeping.
+  StringWaiterLogSink log_waiter("TEST: Create checkpoint sleeping for");
+
   // Start first session in a thread - it will acquire the lock and sleep.
   auto* first_session_ptr = session1.get();
   auto first_session_future = std::async(std::launch::async, [first_session_ptr]() {
     return first_session_ptr->InitBootstrapSession();
   });
 
-  // Wait for first session to start and acquire the lock.
-  SleepFor(MonoDelta::FromSeconds(1));
+  // Wait for first session to acquire the lock and start sleeping.
+  ASSERT_OK(log_waiter.WaitFor(MonoDelta::FromSeconds(10)));
 
   // Now try to start a second session - it should fail to acquire the lock with try_lock.
   Status second_session_status = session2->InitBootstrapSession();
@@ -472,6 +476,9 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
             << ", TEST_delay_create_checkpoint_sec="
             << FLAGS_TEST_delay_create_checkpoint_sec;
 
+  // Set up log waiter to detect when first RPC acquires the lock and starts sleeping.
+  StringWaiterLogSink log_waiter("TEST: Create checkpoint sleeping for");
+
   // Start first RPC call in a separate thread - it will acquire the lock and sleep.
   // Use a longer timeout so the RPC doesn't timeout before the sleep completes.
   auto first_rpc_future = std::async(std::launch::async, [this]() {
@@ -486,8 +493,8 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
         remote_bootstrap_proxy_->BeginRemoteBootstrapSession(req, &resp, &controller), &controller);
   });
 
-  // Wait for first RPC to start and acquire the checkpoint lock.
-  SleepFor(MonoDelta::FromMilliseconds(100));
+  // Wait for first RPC to acquire the lock and start sleeping.
+  ASSERT_OK(log_waiter.WaitFor(MonoDelta::FromSeconds(10)));
 
   // Now try to make a second RPC call - it should fail to acquire the lock with try_lock.
   BeginRemoteBootstrapSessionResponsePB resp;
@@ -561,13 +568,11 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSRPCTimeoutWithCheckpointLock) {
       GetTabletId(), GetLocalUUID(), &resp2, &controller2);
 
   LOG(INFO) << "Second RPC status after first RPC timed out: " << second_rpc_status.ToString();
-  if (first_rpc_start_time.GetDeltaSince(MonoTime::Now()).ToSeconds() <
-      FLAGS_TEST_delay_create_checkpoint_sec) {
+  if (first_rpc_start_time.GetDeltaSince(MonoTime::Now()).ToSeconds() < kDelayCreateCheckpointSec) {
     ASSERT_TRUE(second_rpc_status.IsRemoteError())
-      << "Expected RemoteError status, got: " << second_rpc_status;
+        << "Expected RemoteError, got: " << second_rpc_status;
     ASSERT_STR_CONTAINS(second_rpc_status.ToString(), "Internal error");
-    ASSERT_STR_CONTAINS(second_rpc_status.ToString(),
-                        "Unable to acquire checkpoint lock");
+    ASSERT_STR_CONTAINS(second_rpc_status.ToString(), "Unable to acquire checkpoint lock");
   } else {
     ASSERT_OK(second_rpc_status);
   }
@@ -576,7 +581,6 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSRPCTimeoutWithCheckpointLock) {
   // server side is still asleep and holding the lock.
   // Wait to ensure it wakes up and completes the checkpoint
   // releasing the lock.
-  LOG(INFO) << "Sleeping for " << kDelayCreateCheckpointSec << " seconds";
   SleepFor(MonoDelta::FromSeconds(kDelayCreateCheckpointSec));
 
   // Now the next RPC should succeed.

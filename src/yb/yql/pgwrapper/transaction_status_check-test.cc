@@ -203,6 +203,7 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
 // Test that the transaction status check runs once after every boot.
 // It should have nothing to do when tserver/config did not change.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootNoChange) {
+  ASSERT_OK(BackgroundTaskRunCountInc(0));
   // Create a log waiter to wait for the message that shows the check has triggered on boot.
   StringWaiterLogSink log_sink(RebootTriggerLogline());
   // Create a log waiter to wait for the mismatch message.
@@ -225,6 +226,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootNoChange) {
 // Test that the transaction status check does not take any action on scaling down.
 // It should trigger but do nothing.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckNoActionOnScaleDown) {
+  ASSERT_OK(BackgroundTaskRunCountInc(0));
   // Create a log waiter to wait for the trigger message on reboot.
   StringWaiterLogSink log_sink_scale_down(RebootTriggerLogline());
   // Create a log waiter to wait for the mismatch message.
@@ -256,6 +258,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckNoActionOnScaleDown) {
 // Test that the transaction status check runs once after every boot.
 // It detects and takes action if there are new tservers.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootTserverChange) {
+  ASSERT_OK(BackgroundTaskRunCountInc(0));
   // Needed to scaleup the number of tablets with tserver change.
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) = 0;
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver) = 2;
@@ -287,6 +290,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootTserverChange) {
 // Test that the transaction status check runs once after every boot.
 // It detects and takes action if the relevant flags change.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootFlagChange) {
+  ASSERT_OK(BackgroundTaskRunCountInc(0));
   // Create a log waiter to wait for the trigger message on reboot.
   StringWaiterLogSink log_sink_scale_down(RebootTriggerLogline());
   // Create a log waiter to wait for the mismatch message.

@@ -457,9 +457,6 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
   // Wait for first session to complete and verify it succeeded.
   Status first_session_status = first_session_future.get();
   ASSERT_OK(first_session_status);
-
-  // Reset the test flag.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = 0;
 }
 
 // Test that when a BeginRemoteBootstrapSession RPC holds the checkpoint lock,
@@ -512,9 +509,6 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
   // Wait for first RPC to complete and verify it succeeded.
   Status first_rpc_status = first_rpc_future.get();
   ASSERT_OK(first_rpc_status);
-
-  // Reset the test flag.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = 0;
 }
 
 // Test that when a BeginRemoteBootstrapSession RPC times out while holding

@@ -70,8 +70,6 @@
 #include "yb/master/master_fwd.h"
 #include "yb/master/mini_master.h"
 
-#include "yb/rocksdb/db/filename.h"
-
 #include "yb/tablet/tablet_bootstrap_if.h"
 #include "yb/tablet/tablet_metadata.h"
 #include "yb/tablet/tablet.h"
@@ -92,13 +90,11 @@
 #include "yb/util/status_log.h"
 #include "yb/util/tsan_util.h"
 #include "yb/util/flags.h"
-#include "yb/util/size_literals.h"
 #include "yb/util/sync_point.h"
 
 #include "yb/yql/pgwrapper/libpq_utils.h"
 
 using namespace std::literals;
-using namespace yb::size_literals;
 
 DEFINE_NON_RUNTIME_int32(test_delete_leader_num_iters, 3,
              "Number of iterations to run in TestDeleteLeaderDuringRemoteBootstrapStressTest.");
@@ -278,7 +274,7 @@ class RemoteBootstrapITest : public CreateTableITestBase {
     int64_t rows_inserted;
   };
   Result<TabletWorkloadInfo> PopulateTabletAndGetTabletId(
-      int num_rows = 5000, size_t payload_bytes = 1024, const MonoDelta& timeout = 40s);
+      int num_rows = 5000, size_t payload_bytes = 1024, MonoDelta timeout = 40s);
 
   // Delete all SST files from a tablet's RocksDB directory to trigger remote bootstrap.
   // This will cause the tablet to be marked as FAILED when it's bootstrapped.
@@ -1905,7 +1901,8 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
 
   // Wait for the first RPC to start and acquire the checkpoint lock on the leader.
   LogWaiter checkpoint_log_waiter(leader_tserver, "TEST: Create checkpoint sleeping for");
-  ASSERT_OK(checkpoint_log_waiter.WaitFor(MonoDelta::FromSeconds(kDelayRemovingPeerSecs + 10)));
+  ASSERT_OK(checkpoint_log_waiter.WaitFor(
+      MonoDelta::FromSeconds(2 * kDelayCreateCheckpointSecs)));
   LOG(INFO) << "First RPC has acquired the checkpoint lock";
 
   // Check that we have 1 active RPC thread and 1 active RBS session.
@@ -1919,7 +1916,8 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
 
   // Wait for the first RPC to timeout on the follower, triggering a second attempt.
   LogWaiter rpc_timeout_log_waiter(follower_tserver, "Start remote bootstrap failed: Timed out");
-  ASSERT_OK(rpc_timeout_log_waiter.WaitFor(MonoDelta::FromMilliseconds(kRBSSessionTimeoutMs+1000)));
+  ASSERT_OK(rpc_timeout_log_waiter.WaitFor(
+      MonoDelta::FromMilliseconds(kRBSSessionTimeoutMs * 1.2)));
   LOG(INFO) << "First RPC has timed out on the follower";
 
   // After the timeout, the first RPC's client side has timed out, but the server-side
@@ -2613,7 +2611,7 @@ TEST_F(RemoteBootstrapITest, TestFetchDataIsRetriedOnFailures) {
 }
 
 Result<RemoteBootstrapITest::TabletWorkloadInfo> RemoteBootstrapITest::PopulateTabletAndGetTabletId(
-    int num_rows, size_t payload_bytes, const MonoDelta& timeout) {
+    int num_rows, size_t payload_bytes, MonoDelta timeout) {
   // Populate a tablet with some data.
   LOG(INFO) << "Starting workload";
   TestYcqlWorkload workload(cluster_.get());
@@ -2641,23 +2639,12 @@ Result<RemoteBootstrapITest::TabletWorkloadInfo> RemoteBootstrapITest::PopulateT
 Status RemoteBootstrapITest::DeleteTabletSSTFiles(
     const std::string& tablet_id, TServerDetails* ts) {
   auto* env = Env::Default();
-  const auto data_dir = cluster_->tablet_server_by_uuid(ts->uuid())->GetDataDirs()[0];
-  auto meta_dir = FsManager::GetRaftGroupMetadataDir(data_dir);
-  auto metadata_path = JoinPathSegments(meta_dir, tablet_id);
-  tablet::RaftGroupReplicaSuperBlockPB superblock;
-  RETURN_NOT_OK(pb_util::ReadPBContainerFromPath(env, metadata_path, &superblock));
-  auto tablet_data_dir = superblock.kv_store().rocksdb_dir();
-  const auto& rocksdb_files = VERIFY_RESULT(env->GetChildren(tablet_data_dir, ExcludeDots::kTrue));
-  SCHECK_GT(rocksdb_files.size(), 0, IllegalState, "No files found in tablet data directory");
-  for (const auto& file : rocksdb_files) {
-    uint64_t number;
-    rocksdb::FileType type;
-    if (rocksdb::ParseFileName(file, &number, &type)) {
-      if (type == rocksdb::kTableFile || type == rocksdb::kTableSBlockFile) {
-        RETURN_NOT_OK(env->DeleteFile(JoinPathSegments(tablet_data_dir, file)));
-        LOG(INFO) << "Deleted file " << JoinPathSegments(tablet_data_dir, file);
-      }
-    }
+  auto ts_index = cluster_->tablet_server_index_by_uuid(ts->uuid());
+  auto sst_files = VERIFY_RESULT(inspect_->ListTabletSstFilesOnTS(ts_index, tablet_id));
+  SCHECK_GT(sst_files.size(), 0, IllegalState, "No SST files found for tablet");
+  for (const auto& file : sst_files) {
+    RETURN_NOT_OK(env->DeleteFile(file));
+    LOG(INFO) << "Deleted file " << file;
   }
   return Status::OK();
 }

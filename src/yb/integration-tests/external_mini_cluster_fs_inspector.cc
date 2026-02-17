@@ -69,6 +69,22 @@ using strings::Substitute;
 using tablet::TabletDataState;
 using tablet::RaftGroupReplicaSuperBlockPB;
 
+namespace {
+
+void FilterSstFiles(const vector<string>& files, vector<string>* sst_files) {
+  for (const auto& file : files) {
+    uint64_t number;
+    rocksdb::FileType type;
+    std::string filename = std::filesystem::path(file).filename();
+    if (ParseFileName(filename, &number, &type) &&
+        (type == rocksdb::kTableFile || type == rocksdb::kTableSBlockFile)) {
+      sst_files->push_back(file);
+    }
+  }
+}
+
+}  // namespace
+
 ExternalMiniClusterFsInspector::ExternalMiniClusterFsInspector(ExternalMiniCluster* cluster)
     : env_(Env::Default()),
       cluster_(CHECK_NOTNULL(cluster)) {
@@ -137,18 +153,21 @@ Result<vector<string>> ExternalMiniClusterFsInspector::ListTableSstFilesOnTS(
       }
       auto table_sst_dir = JoinPathSegments(ts_rocksdb_dir, table);
       vector<string> files = VERIFY_RESULT(RecursivelyListFilesInDir(table_sst_dir));
-      for (const auto& file : files) {
-        uint64_t number;
-        rocksdb::FileType type;
-        std::string filename = std::filesystem::path(file).filename();
-        if (ParseFileName(filename, &number, &type) &&
-            (type == rocksdb::kTableFile || type == rocksdb::kTableSBlockFile)) {
-          sst_files.push_back(file);
-        }
-      }
+      FilterSstFiles(files, &sst_files);
       break;
     }
   }
+  return sst_files;
+}
+
+Result<vector<string>> ExternalMiniClusterFsInspector::ListTabletSstFilesOnTS(
+    size_t index, const TabletId& tablet_id) {
+  RaftGroupReplicaSuperBlockPB superblock;
+  RETURN_NOT_OK(ReadTabletSuperBlockOnTS(index, tablet_id, &superblock));
+  auto rocksdb_dir = superblock.kv_store().rocksdb_dir();
+  auto files = VERIFY_RESULT(RecursivelyListFilesInDir(rocksdb_dir));
+  vector<string> sst_files;
+  FilterSstFiles(files, &sst_files);
   return sst_files;
 }
 

@@ -196,13 +196,26 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
   Status BackgroundTaskRunCountInc(int32_t prev_run_count) {
     return WaitFor([&]() -> Result<bool> {
       return master::TEST_transaction_status_check_run_count() > prev_run_count;
-    }, MonoDelta::FromSeconds(30), "Waiting for background task to trigger");
+    }, MonoDelta::FromSeconds(60), "Waiting for background task to trigger");
   }
+
+  Status WaitForGlobalTxnStatusTableCreation(MonoDelta timeout = MonoDelta::FromSeconds(30)) {
+    auto client = VERIFY_RESULT(cluster_->CreateClient());
+    return WaitFor([&]() -> Result<bool> {
+      auto result = client->GetTransactionStatusTablets(CloudInfoPB());
+      if (!result.ok()) {
+        return false;
+      }
+      return !result->global_tablets.empty();
+    }, timeout, "Waiting for global transaction status table to be created");
+  }
+
 };
 
 // Test that the transaction status check runs once after every boot.
 // It should have nothing to do when tserver/config did not change.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootNoChange) {
+  ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
   ASSERT_OK(BackgroundTaskRunCountInc(0));
   // Create a log waiter to wait for the message that shows the check has triggered on boot.
   StringWaiterLogSink log_sink(RebootTriggerLogline());
@@ -226,6 +239,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootNoChange) {
 // Test that the transaction status check does not take any action on scaling down.
 // It should trigger but do nothing.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckNoActionOnScaleDown) {
+  ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
   ASSERT_OK(BackgroundTaskRunCountInc(0));
   // Create a log waiter to wait for the trigger message on reboot.
   StringWaiterLogSink log_sink_scale_down(RebootTriggerLogline());
@@ -258,6 +272,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckNoActionOnScaleDown) {
 // Test that the transaction status check runs once after every boot.
 // It detects and takes action if there are new tservers.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootTserverChange) {
+  ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
   ASSERT_OK(BackgroundTaskRunCountInc(0));
   // Needed to scaleup the number of tablets with tserver change.
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) = 0;
@@ -290,6 +305,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootTserverChange) {
 // Test that the transaction status check runs once after every boot.
 // It detects and takes action if the relevant flags change.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootFlagChange) {
+  ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
   ASSERT_OK(BackgroundTaskRunCountInc(0));
   // Create a log waiter to wait for the trigger message on reboot.
   StringWaiterLogSink log_sink_scale_down(RebootTriggerLogline());
@@ -333,9 +349,6 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckAutoScale) {
   // Enable name_transaction_tables_with_tablespace_id for deterministic test.
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_name_transaction_tables_with_tablespace_id) = true;
 
-  // Create a client to access the cluster.
-  auto client = ASSERT_RESULT(cluster_->CreateClient());
-
   LOG(INFO) << "Initial cluster state:number of tablet servers: "
       << cluster_->num_tablet_servers()
       << ", replication factor: " << FLAGS_replication_factor
@@ -346,16 +359,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckAutoScale) {
   ASSERT_EQ(cluster_->num_tablet_servers(), 1);
 
   // Wait for the global transaction status table to be created.
-  // The table is created during master init.
-  ASSERT_OK(WaitFor([&]() -> Result<bool> {
-    auto result = client->GetTransactionStatusTablets(CloudInfoPB());
-    if (!result.ok()) {
-      return false;
-    }
-    auto txn_tablets = *result;
-    return !txn_tablets.global_tablets.empty();
-  }, MonoDelta::FromSeconds(30),
-  "Waiting for transaction status table to be created"));
+  ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
 
   // Background task runs once each time tserver joins.
   WaitAndVerifyBackgroundTaskRuns(1, "init");

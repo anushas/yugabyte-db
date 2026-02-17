@@ -1868,14 +1868,17 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
 
   ASSERT_OK(WaitUntilTabletInState(follower_ts, tablet_id, tablet::RUNNING, kTimeout));
 
+  // Shutdown the tserver before deleting SST files to avoid a race with concurrent compactions.
+  // They may change the state of persistence, and deletion could hit "Not found" error.
+  auto* follower_tserver = cluster_->tablet_server_by_uuid(follower_ts->uuid());
+  follower_tserver->Shutdown();
+
   // Delete SST files to trigger remote bootstrap.
   ASSERT_OK(DeleteTabletSSTFiles(tablet_id, follower_ts));
 
   // Restart the tserver so that the tablet gets marked as FAILED when it's bootstrapped.
   // Flag TEST_delay_removing_peer_with_failed_tablet_secs will keep the tablet in the FAILED state
   // for the specified amount of time so that we can verify that it was indeed marked as FAILED.
-  auto* follower_tserver = cluster_->tablet_server_by_uuid(follower_ts->uuid());
-  follower_tserver->Shutdown();
   ASSERT_OK(follower_tserver->Restart());
 
   // Set the checkpoint sleep flag on the leader tserver (which will be the source of remote

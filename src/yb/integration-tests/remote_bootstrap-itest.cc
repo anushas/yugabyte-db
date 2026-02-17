@@ -1936,11 +1936,11 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   ASSERT_GE(num_rbs_sessions, 2);
 
   // Wait a bit more and verify it never exceeds 2 until the lock is released.
-  auto remainingTime = (kDelayCreateCheckpointSecs*1000 - kRBSSessionTimeoutMs);
-  SleepFor(MonoDelta::FromMilliseconds(remainingTime/2));
+  auto remainingTime = (kDelayCreateCheckpointSecs * 1000 - kRBSSessionTimeoutMs);
+  SleepFor(MonoDelta::FromMilliseconds(remainingTime / 2));
   num_rbs_sessions = GetNumRBSessions(leader_tserver);
   rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
-  LOG(INFO) << "RBS sessions on leader (after additional " << remainingTime/2 << "ms wait): "
+  LOG(INFO) << "RBS sessions on leader (after additional " << remainingTime / 2 << "ms wait): "
             << num_rbs_sessions << " rpc threads: " << rpc_inbound_calls_alive;
   ASSERT_LE(rpc_inbound_calls_alive, 2);
   ASSERT_GE(num_rbs_sessions, 2);

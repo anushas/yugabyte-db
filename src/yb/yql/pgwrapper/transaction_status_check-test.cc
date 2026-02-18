@@ -177,15 +177,10 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
     }, timeout, "Waiting for tablet server to finish creating tablets");
   }
 
-  // Helper to sleep and verify background task run count.
-  void WaitAndVerifyBackgroundTaskRuns(
-      int32_t expected_run_count,
-      const std::string& tag = "") {
+  // Helper to sleep and return background task run count.
+  int32_t SleepAndGetBackgroundTaskRunCount() {
     SleepFor(MonoDelta::FromSeconds(FLAGS_transaction_status_check_interval_sec * 3 + 2));
-    auto run_count = master::TEST_transaction_status_check_run_count();
-    ASSERT_EQ(run_count, expected_run_count)
-      << tag << ": Background task should have run " << expected_run_count
-      << " times but got " << run_count;
+    return master::TEST_transaction_status_check_run_count();
   }
 
   std::string RebootTriggerLogline() {
@@ -193,7 +188,7 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
       cluster_->num_tablet_servers());
   }
 
-  Status BackgroundTaskRunCountInc(int32_t prev_run_count) {
+  Status WaitUntilBgTaskRunCountExceeds(int32_t prev_run_count) {
     return WaitFor([&]() -> Result<bool> {
       return master::TEST_transaction_status_check_run_count() > prev_run_count;
     }, MonoDelta::FromSeconds(60), "Waiting for background task to trigger");
@@ -216,7 +211,7 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
 // It should have nothing to do when tserver/config did not change.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootNoChange) {
   ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
-  ASSERT_OK(BackgroundTaskRunCountInc(0));
+  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(0));
   // Create a log waiter to wait for the message that shows the check has triggered on boot.
   StringWaiterLogSink log_sink(RebootTriggerLogline());
   // Create a log waiter to wait for the mismatch message.
@@ -229,7 +224,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootNoChange) {
 
   // Background task should trigger on every boot.
   // But no action is taken since tserver/config did not change.
-  ASSERT_OK(BackgroundTaskRunCountInc(run_count_before));
+  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(run_count_before));
   // Trigger message should have been logged.
   ASSERT_EQ(log_sink.GetEventCount(), 1);
   // No mismatch message should have been logged.
@@ -240,7 +235,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootNoChange) {
 // It should trigger but do nothing.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckNoActionOnScaleDown) {
   ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
-  ASSERT_OK(BackgroundTaskRunCountInc(0));
+  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(0));
   // Create a log waiter to wait for the trigger message on reboot.
   StringWaiterLogSink log_sink_scale_down(RebootTriggerLogline());
   // Create a log waiter to wait for the mismatch message.
@@ -257,26 +252,29 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckNoActionOnScaleDown) {
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = 2;
   // Opportunitistically verify that flag changes do not trigger the background task.
   auto run_count_before = master::TEST_transaction_status_check_run_count();
-  SleepFor(MonoDelta::FromSeconds(3*FLAGS_transaction_status_check_interval_sec + 2));
+  SleepFor(MonoDelta::FromSeconds(3 * FLAGS_transaction_status_check_interval_sec + 2));
   ASSERT_EQ(run_count_before, master::TEST_transaction_status_check_run_count());
 
   // Restart the cluster.
   ASSERT_OK(cluster_->RestartSync());
   // Background task should trigger on reboot.
   // But no action is taken since the number of tablets is more than the expected number.
-  ASSERT_OK(BackgroundTaskRunCountInc(run_count_before));
+  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(run_count_before));
   ASSERT_EQ(log_sink_scale_down.GetEventCount(), 1);
   ASSERT_EQ(log_sink2.GetEventCount(), 0);
 }
 
-// Test that the transaction status check runs once after every boot.
-// It detects and takes action if there are new tservers.
-TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootTserverChange) {
+// Test that the background task does not trigger if the elapsed time since
+// the last check (on boot) is less than the check interval.
+TEST_F(MasterTxnStatusCheck, TransactionStatusCheckInterval) {
   ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
-  ASSERT_OK(BackgroundTaskRunCountInc(0));
-  // Needed to scaleup the number of tablets with tserver change.
+  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(0));
+  // Needed to scale up the number of tablets with tserver change.
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) = 0;
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver) = 2;
+  // Decrease the check interval to a smaller value to speed up the test.
+  const auto kCheckInterval = 30;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = kCheckInterval;
 
   auto run_count_before = master::TEST_transaction_status_check_run_count();
   // Add a new tserver.
@@ -285,28 +283,20 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootTserverChange) {
   ASSERT_OK(cluster_->AddTabletServer(ts_opts, true));
   ASSERT_OK(cluster_->WaitForTabletServerCount(2));
 
-  // Opportunitistically verify that the background task does not trigger if the elapsed time since
-  // the last check (on boot) is less than the check interval (default 900s).
-  SleepFor(MonoDelta::FromSeconds(10));
+  // Verify that the background task does not trigger if the elapsed time since
+  // the last check (on boot) is less than the check interval.
+  SleepFor(MonoDelta::FromSeconds(kCheckInterval / 2));
   ASSERT_EQ(master::TEST_transaction_status_check_run_count(), run_count_before);
 
-  // Create log waiter for the trigger message on reboot.
-  StringWaiterLogSink log_sink_tserver_change(RebootTriggerLogline());
-  // Create a log waiter to wait for the mismatch message.
-  PatternWaiterLogSink<std::string> log_sink2(mismatch_logline_);
-
-  // Restart the cluster.
-  ASSERT_OK(cluster_->RestartSync());
-  ASSERT_OK(BackgroundTaskRunCountInc(run_count_before));
-  ASSERT_EQ(log_sink_tserver_change.GetEventCount(), 1);
-  ASSERT_EQ(log_sink2.GetEventCount(), 1);
+  // It will eventually trigger after the check interval.
+  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(run_count_before));
 }
 
 // Test that the transaction status check runs once after every boot.
 // It detects and takes action if the relevant flags change.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootFlagChange) {
   ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
-  ASSERT_OK(BackgroundTaskRunCountInc(0));
+  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(0));
   // Create a log waiter to wait for the trigger message on reboot.
   StringWaiterLogSink log_sink_scale_down(RebootTriggerLogline());
   // Create a log waiter to wait for the mismatch message.
@@ -318,19 +308,50 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootFlagChange) {
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) =
       original_transaction_table_num_tablets + 1;
 
-  // Decrease the check interval to 2 seconds.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = 2;
-  // Opportunitistically verify that flag changes do not trigger the background task.
   auto run_count_before = master::TEST_transaction_status_check_run_count();
-  SleepFor(MonoDelta::FromSeconds(3*FLAGS_transaction_status_check_interval_sec + 2));
-  ASSERT_EQ(run_count_before, master::TEST_transaction_status_check_run_count());
 
   // Restart the cluster.
   ASSERT_OK(cluster_->RestartSync());
   // Background task should trigger on boot and take action.
-  ASSERT_OK(BackgroundTaskRunCountInc(run_count_before));
+  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(run_count_before));
   ASSERT_EQ(log_sink_scale_down.GetEventCount(), 1);
   ASSERT_EQ(log_sink2.GetEventCount(), 1);
+}
+
+// Test that the background task does not run when autoscale_transaction_tables is disabled.
+// Adding a tserver and restarting should not trigger any scaling, and tablet counts should
+// remain unchanged.
+TEST_F(MasterTxnStatusCheck, TransactionStatusCheckDisabled) {
+  ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
+  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(0));
+
+  // Turn off the feature flag.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_autoscale_transaction_tables) = false;
+
+  // But setup the other flags for auto scaling with tserver change.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) = 0;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver) = 2;
+  // Decrease the check interval to a smaller value.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = 2;
+
+  auto run_count_before = master::TEST_transaction_status_check_run_count();
+
+  auto client = ASSERT_RESULT(cluster_->CreateClient());
+  auto txn_tablets = ASSERT_RESULT(client->GetTransactionStatusTablets(CloudInfoPB()));
+  auto initial_global_tablets = txn_tablets.global_tablets.size();
+  ASSERT_GT(initial_global_tablets, 0);
+
+  // Add a new tserver.
+  auto ts_opts = ASSERT_RESULT(tserver::TabletServerOptions::CreateTabletServerOptions());
+  ts_opts.SetPlacement("test_cloud", "test_region", "zone2");
+  ASSERT_OK(cluster_->AddTabletServer(ts_opts, true));
+  ASSERT_OK(cluster_->WaitForTabletServerCount(2));
+
+  ASSERT_OK(cluster_->RestartSync());
+
+  ASSERT_EQ(SleepAndGetBackgroundTaskRunCount(), run_count_before);
+  txn_tablets = ASSERT_RESULT(client->GetTransactionStatusTablets(CloudInfoPB()));
+  ASSERT_EQ(txn_tablets.global_tablets.size(), initial_global_tablets);
 }
 
 // Test auto scaling of transaction status tables at runtime.
@@ -362,7 +383,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckAutoScale) {
   ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
 
   // Background task runs once each time tserver joins.
-  WaitAndVerifyBackgroundTaskRuns(1, "init");
+  ASSERT_EQ(SleepAndGetBackgroundTaskRunCount(), 1) << "init";
   // Note placement info from the initial tserver (default placement).
   auto* initial_tserver = cluster_->mini_tablet_server(0);
   std::string initial_cloud = initial_tserver->options()->placement_cloud();
@@ -418,7 +439,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckAutoScale) {
             << GetTableIDFromTableName(local_txnstatus_name) << "]";
 
   // Background task runs once more when tserver (zone2) joins.
-  WaitAndVerifyBackgroundTaskRuns(2, "after tserver1 (zone2) joins");
+  ASSERT_EQ(SleepAndGetBackgroundTaskRunCount(), 2) << "after tserver1 (zone2) joins";
 
   // Verify the tablets are as expected. This table info based check
   // is guaranteed to work since the background task has already added
@@ -475,7 +496,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckAutoScale) {
   ASSERT_OK(cluster_->WaitForTabletServerCount(3));
 
   // Verify background task ran once more.
-  WaitAndVerifyBackgroundTaskRuns(3, "after tserver3 (zone3) joins");
+  ASSERT_EQ(SleepAndGetBackgroundTaskRunCount(), 3) << "after tserver3 (zone3) joins";
 
   ASSERT_OK(VerifyTransactionTableTablets(
       local_txnstatus_name,
@@ -514,7 +535,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckAutoScale) {
   ASSERT_OK(cluster_->WaitForTabletServerCount(4));
 
   // Verify background task ran once more.
-  WaitAndVerifyBackgroundTaskRuns(4, "after tserver4 (zone2) joins");
+  ASSERT_EQ(SleepAndGetBackgroundTaskRunCount(), 4) << "after tserver4 (zone2) joins";
 
   ASSERT_OK(VerifyTransactionTableTablets(
       local_txnstatus_name,

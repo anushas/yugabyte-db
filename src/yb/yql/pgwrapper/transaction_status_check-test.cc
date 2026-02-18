@@ -59,7 +59,7 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
   }
 
  protected:
-  std::string mismatch_logline_ = "MISMATCH detected";
+  std::string mismatch_logline_ = "insufficient tablets detected";
 
   // Helper to get tablespace OID from PostgreSQL.
   Result<uint32_t> GetTablespaceOid(const std::string& tablespace_name) {

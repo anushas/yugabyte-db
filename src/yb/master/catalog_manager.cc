@@ -5293,8 +5293,8 @@ Status CatalogManager::CreateTransactionStatusTableInternal(
   } else {
     // When the local transaction status table is created, the number
     // of tablets should be set based on the number of live tservers
-    // in the placement info.
-    if (tablespace_id || req.has_replication_info()) {
+    // that match the placement info.
+    if (req.has_tablespace_id() || req.has_replication_info()) {
       const ReplicationInfoPB& table_replication_info =
           VERIFY_RESULT(GetTableReplicationInfo(req.replication_info(), req.tablespace_id()));
       auto live_tservers = VERIFY_RESULT(FindTServersForPlacementInfo(

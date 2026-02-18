@@ -309,10 +309,8 @@ void CatalogManagerBgTasks::RunOnceAsLeader(const LeaderEpoch& epoch) {
   // Abort inactive YSQL BackendsCatalogVersionJob jobs.
   master_->ysql_backends_manager()->AbortInactiveJobs();
 
-  // Periodically check if there are sufficient tablets in the transaction status table for the
-  // current cluster configuration. If not, add tablets.
   if (FLAGS_autoscale_transaction_tables) {
-    CheckTransactionStatusTable(epoch);
+    ScaleupTransactionStatusTablesIfNeeded(epoch);
   }
 }
 
@@ -362,20 +360,17 @@ void CatalogManagerBgTasks::Run() {
 }
 
 Status CatalogManagerBgTasks::AddTabletsToTransactionStatusTable(
-    const TableInfoPtr& table, size_t tablets_to_add, bool is_global, const LeaderEpoch& epoch) {
-  const auto prefix = is_global ? "Global" : "Local";
-  for (size_t i = 1; i <= tablets_to_add; i++) {
-    AddTransactionStatusTabletRequestPB req;
-    AddTransactionStatusTabletResponsePB resp;
-    req.set_table_id(table->id());
+    const TableInfoPtr& table, size_t tablets_to_add, const LeaderEpoch& epoch) {
+  AddTransactionStatusTabletRequestPB req;
+  AddTransactionStatusTabletResponsePB resp;
+  req.set_table_id(table->id());
+  for (size_t i = 0; i < tablets_to_add; i++) {
     RETURN_NOT_OK(catalog_manager_->AddTransactionStatusTablet(&req, &resp, nullptr, epoch));
-    VLOG(1) << prefix << " transaction status table check: Added " << i
-            << " tablet(s) to table " << table->name() << " (" << table->id() << ")";
   }
   return Status::OK();
 }
 
-Status CatalogManagerBgTasks::CheckAndAddTabletsIfNeeded(
+Status CatalogManagerBgTasks::AddTabletsToTransactionStatusTableIfNeeded(
     const TableInfoPtr& table, size_t num_live_tservers,
     const ReplicationInfoPB& repl_info, bool is_global, const LeaderEpoch& epoch) {
   const auto prefix = is_global ? "Global" : "Local";
@@ -396,22 +391,21 @@ Status CatalogManagerBgTasks::CheckAndAddTabletsIfNeeded(
 
   size_t tablets_to_add = expected_tablets - num_tablets;
 
-  LOG(INFO) << prefix << " transaction status table check: MISMATCH detected"
-      << ", table=" << table->name() << " (" << table->id() << ")"
-      << (is_global ? "" : ", cloud info: " + repl_info.ShortDebugString())
+  LOG(INFO) << prefix << " transaction status table check: insufficient tablets detected."
+      << " Adding " << tablets_to_add << " more tablets."
+      << " Details: table=" << table->name() << " (" << table->id() << ")."
+      << (is_global ? "" : ", placement info: " + repl_info.ShortDebugString())
       << ", tablets=" << num_tablets
       << ", expected=" << expected_tablets
       << " (transaction_table_num_tablets=" << flag_num_tablets
       << " or (num_live_tservers=" << num_live_tservers
       << " * transaction_table_num_tablets_per_tserver=" << flag_num_tablets_per_tserver << "))"
       << ", num_tablets_per_tserver=" << (num_tablets / num_live_tservers);
-  LOG(INFO) << prefix << " transaction status table check: Adding "
-      << tablets_to_add << " tablets.";
 
-  return AddTabletsToTransactionStatusTable(table, tablets_to_add, is_global, epoch);
+  return AddTabletsToTransactionStatusTable(table, tablets_to_add, epoch);
 }
 
-void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch) {
+void CatalogManagerBgTasks::ScaleupTransactionStatusTablesIfNeeded(const LeaderEpoch& epoch) {
   auto interval_sec = FLAGS_transaction_status_check_interval_sec;
   if (interval_sec <= 0) {
     return;  // Check is disabled
@@ -442,7 +436,7 @@ void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch
     return;
   }
 
-  auto s = CheckAndAddTabletsIfNeeded(
+  auto s = AddTabletsToTransactionStatusTableIfNeeded(
       global_txn_table, num_live_tservers, ReplicationInfoPB(), /* is_global */ true, epoch);
   if (!s.ok()) {
     WARN_NOT_OK(s, "Global transaction status table check: Failed. Will retry in next iteration.");
@@ -450,13 +444,17 @@ void CatalogManagerBgTasks::CheckTransactionStatusTable(const LeaderEpoch& epoch
   }
 
   const TableId& global_txn_table_id = global_txn_table->id();
-  CheckLocalTransactionStatusTables(epoch, global_txn_table_id);
+  s = ScaleupLocalTransactionStatusTablesIfNeeded(epoch, global_txn_table_id);
+  if (!s.ok()) {
+    WARN_NOT_OK(s, "Local transaction status table check: Failed. Will retry in next iteration.");
+    return;
+  }
 
   last_live_tservers_ = num_live_tservers;
   TEST_transaction_status_check_run_counter.fetch_add(1, std::memory_order_relaxed);
 }
 
-void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
+Status CatalogManagerBgTasks::ScaleupLocalTransactionStatusTablesIfNeeded(
     const LeaderEpoch& epoch, const TableId& global_txn_table_id) {
 
   // Collect all the local transaction status tables and their placements.
@@ -479,7 +477,7 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
       auto repl_info = catalog_manager_->GetTableReplicationInfo(table);
       if (!repl_info.ok()) {
         WARN_NOT_OK(repl_info, Format(
-            "Failed to get cloud info - skipping table $0 ($1)",
+            "Failed to get replication info - skipping table $0 ($1)",
             table->name(), table_id));
         continue;
       }
@@ -508,13 +506,10 @@ void CatalogManagerBgTasks::CheckLocalTransactionStatusTables(
       continue;
     }
 
-    auto s = CheckAndAddTabletsIfNeeded(
-        table, num_live_tservers, repl_info, /* is_global */ false, epoch);
-    if (!s.ok()) {
-      WARN_NOT_OK(s, "Local transaction status table check: Failed. Will retry in next iteration.");
-      return;
-    }
+    RETURN_NOT_OK(AddTabletsToTransactionStatusTableIfNeeded(
+        table, num_live_tservers, repl_info, /* is_global */ false, epoch));
   }
+  return Status::OK();
 }
 
 } // namespace yb::master

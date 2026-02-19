@@ -310,7 +310,7 @@ void CatalogManagerBgTasks::RunOnceAsLeader(const LeaderEpoch& epoch) {
   master_->ysql_backends_manager()->AbortInactiveJobs();
 
   if (FLAGS_autoscale_transaction_tables) {
-    ScaleupTransactionStatusTablesIfNeeded(epoch);
+    ScaleUpTransactionStatusTablesIfNeeded(epoch);
   }
 }
 
@@ -405,9 +405,10 @@ Status CatalogManagerBgTasks::AddTabletsToTransactionStatusTableIfNeeded(
   return AddTabletsToTransactionStatusTable(table, tablets_to_add, epoch);
 }
 
-void CatalogManagerBgTasks::ScaleupTransactionStatusTablesIfNeeded(const LeaderEpoch& epoch) {
+void CatalogManagerBgTasks::ScaleUpTransactionStatusTablesIfNeeded(const LeaderEpoch& epoch) {
   auto interval_sec = FLAGS_transaction_status_check_interval_sec;
   if (interval_sec <= 0) {
+    LOG(WARNING) << "Invalid transaction status check interval: " << FLAGS_transaction_status_check_interval_sec;
     return;  // Check is disabled
   }
 
@@ -444,7 +445,7 @@ void CatalogManagerBgTasks::ScaleupTransactionStatusTablesIfNeeded(const LeaderE
   }
 
   const TableId& global_txn_table_id = global_txn_table->id();
-  s = ScaleupLocalTransactionStatusTablesIfNeeded(epoch, global_txn_table_id);
+  s = ScaleUpLocalTransactionStatusTablesIfNeeded(epoch, global_txn_table_id);
   if (!s.ok()) {
     WARN_NOT_OK(s, "Local transaction status table check: Failed. Will retry in next iteration.");
     return;
@@ -454,7 +455,7 @@ void CatalogManagerBgTasks::ScaleupTransactionStatusTablesIfNeeded(const LeaderE
   TEST_transaction_status_check_run_counter.fetch_add(1, std::memory_order_relaxed);
 }
 
-Status CatalogManagerBgTasks::ScaleupLocalTransactionStatusTablesIfNeeded(
+Status CatalogManagerBgTasks::ScaleUpLocalTransactionStatusTablesIfNeeded(
     const LeaderEpoch& epoch, const TableId& global_txn_table_id) {
 
   // Collect all the local transaction status tables and their placements.

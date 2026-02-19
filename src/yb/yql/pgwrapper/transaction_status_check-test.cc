@@ -51,11 +51,14 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
     LOG(INFO) << "MasterTxnStatusCheck SetUp: "
         << "tservers: " << cluster_->num_tablet_servers()
         << ", bgtask run count: " << master::TEST_transaction_status_check_run_count()
+        << ", flag:autoscale: " << FLAGS_autoscale_transaction_tables
         << ", flag:check_interval_sec: " << FLAGS_transaction_status_check_interval_sec
         << ", flag:num_tablets: " << FLAGS_transaction_table_num_tablets
         << ", flag:num_tablets_per_tserver: " << FLAGS_transaction_table_num_tablets_per_tserver
         << ", flag:broadcast_address: " << FLAGS_TEST_check_broadcast_address
         << ", flag:load_balancing: " << FLAGS_enable_load_balancing;
+    ASSERT_TRUE(FLAGS_autoscale_transaction_tables)
+        << "autoscale_transaction_tables must be enabled (default is true) for this test";
   }
 
  protected:
@@ -356,9 +359,6 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckDisabled) {
 
 // Test auto scaling of transaction status tables at runtime.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckAutoScale) {
-  ASSERT_TRUE(FLAGS_autoscale_transaction_tables)
-      << "autoscale_transaction_tables must be enabled (default is true) for this test";
-
   // Decrease the transaction status check interval to 2 seconds
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = 2;
   // Reset transaction_table_num_tablets to test auto scaling (up) with tserver changes.
@@ -369,12 +369,6 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckAutoScale) {
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_auto_create_local_transaction_tables) = true;
   // Enable name_transaction_tables_with_tablespace_id for deterministic test.
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_name_transaction_tables_with_tablespace_id) = true;
-
-  LOG(INFO) << "Initial cluster state:number of tablet servers: "
-      << cluster_->num_tablet_servers()
-      << ", replication factor: " << FLAGS_replication_factor
-      << ", " << FLAGS_TEST_check_broadcast_address
-      << ", " << FLAGS_enable_load_balancing;
 
   // Test assumptions.
   ASSERT_EQ(cluster_->num_tablet_servers(), 1);

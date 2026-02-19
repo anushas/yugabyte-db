@@ -82,8 +82,8 @@ class CatalogManagerBgTasks final {
   Status AddTabletsToTransactionStatusTableIfNeeded(
       const TableInfoPtr& table, size_t num_live_tservers,
       const ReplicationInfoPB& repl_info, bool is_global, const LeaderEpoch& epoch);
-  void ScaleupTransactionStatusTablesIfNeeded(const LeaderEpoch& epoch);
-  Status ScaleupLocalTransactionStatusTablesIfNeeded(const LeaderEpoch& epoch,
+  void ScaleUpTransactionStatusTablesIfNeeded(const LeaderEpoch& epoch);
+  Status ScaleUpLocalTransactionStatusTablesIfNeeded(const LeaderEpoch& epoch,
       const TableId& global_txn_table_id);
 
   std::atomic<bool> closing_;

@@ -408,7 +408,6 @@ Status CatalogManagerBgTasks::AddTabletsToTransactionStatusTableIfNeeded(
 void CatalogManagerBgTasks::ScaleUpTransactionStatusTablesIfNeeded(const LeaderEpoch& epoch) {
   auto interval_sec = FLAGS_transaction_status_check_interval_sec;
   if (interval_sec <= 0) {
-    LOG(WARNING) << "Invalid transaction status check interval: " << FLAGS_transaction_status_check_interval_sec;
     return;  // Check is disabled
   }
 

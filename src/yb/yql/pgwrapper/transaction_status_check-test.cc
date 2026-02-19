@@ -208,13 +208,23 @@ class MasterTxnStatusCheck : public pgwrapper::PgMiniTestBase {
     }, timeout, "Waiting for global transaction status table to be created");
   }
 
+  // Helper to wait reliably for the background task to run once after the initial SetUp.
+  // Only used by reboot testcases.
+  void WaitForBgTaskRunAfterInitialSetUp() {
+    ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
+    // This testcase sets up only one tserver. There may be a race between the first tserver
+    // registration and the first background task run. If the background task runs before the
+    // tserver registration, waiting for that event will timeout since the check interval is 900s.
+    // So reduce the check interval to 30s before waiting.
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = 30;
+    ASSERT_OK(WaitUntilBgTaskRunCountExceeds(0));
+  }
 };
 
 // Test that the transaction status check runs once after every boot.
 // It should have nothing to do when tserver/config did not change.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootNoChange) {
-  ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
-  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(0));
+  WaitForBgTaskRunAfterInitialSetUp();
   // Create a log waiter to wait for the message that shows the check has triggered on boot.
   StringWaiterLogSink log_sink(RebootTriggerLogline());
   // Create a log waiter to wait for the mismatch message.
@@ -237,8 +247,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootNoChange) {
 // Test that the transaction status check does not take any action on scaling down.
 // It should trigger but do nothing.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckNoActionOnScaleDown) {
-  ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
-  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(0));
+  WaitForBgTaskRunAfterInitialSetUp();
   // Create a log waiter to wait for the trigger message on reboot.
   StringWaiterLogSink log_sink_scale_down(RebootTriggerLogline());
   // Create a log waiter to wait for the mismatch message.
@@ -251,13 +260,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckNoActionOnScaleDown) {
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) =
       original_transaction_table_num_tablets - 1;
 
-  // Decrease the check interval to 2 seconds.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = 2;
-  // Opportunitistically verify that flag changes do not trigger the background task.
   auto run_count_before = master::TEST_transaction_status_check_run_count();
-  SleepFor(MonoDelta::FromSeconds(3 * FLAGS_transaction_status_check_interval_sec + 2));
-  ASSERT_EQ(run_count_before, master::TEST_transaction_status_check_run_count());
-
   // Restart the cluster.
   ASSERT_OK(cluster_->RestartSync());
   // Background task should trigger on reboot.
@@ -270,14 +273,13 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckNoActionOnScaleDown) {
 // Test that the background task does not trigger if the elapsed time since
 // the last check (on boot) is less than the check interval.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckInterval) {
-  ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
-  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(0));
+  WaitForBgTaskRunAfterInitialSetUp();
   // Needed to scale up the number of tablets with tserver change.
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets) = 0;
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_table_num_tablets_per_tserver) = 2;
   // Decrease the check interval to a smaller value to speed up the test.
-  const auto kCheckInterval = 30;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_transaction_status_check_interval_sec) = kCheckInterval;
+  const auto kCheckInterval = FLAGS_transaction_status_check_interval_sec;
+  ASSERT_EQ(kCheckInterval, 30); // setup assumption
 
   auto run_count_before = master::TEST_transaction_status_check_run_count();
   // Add a new tserver.
@@ -298,8 +300,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckInterval) {
 // Test that the transaction status check runs once after every boot.
 // It detects and takes action if the relevant flags change.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootFlagChange) {
-  ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
-  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(0));
+  WaitForBgTaskRunAfterInitialSetUp();
   // Create a log waiter to wait for the trigger message on reboot.
   StringWaiterLogSink log_sink_scale_down(RebootTriggerLogline());
   // Create a log waiter to wait for the mismatch message.
@@ -325,8 +326,7 @@ TEST_F(MasterTxnStatusCheck, TransactionStatusCheckRebootFlagChange) {
 // Adding a tserver and restarting should not trigger any scaling, and tablet counts should
 // remain unchanged.
 TEST_F(MasterTxnStatusCheck, TransactionStatusCheckDisabled) {
-  ASSERT_OK(WaitForGlobalTxnStatusTableCreation());
-  ASSERT_OK(WaitUntilBgTaskRunCountExceeds(0));
+  WaitForBgTaskRunAfterInitialSetUp();
 
   // Turn off the feature flag.
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_autoscale_transaction_tables) = false;

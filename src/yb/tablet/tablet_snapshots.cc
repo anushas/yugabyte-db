@@ -70,8 +70,9 @@ DEFINE_test_flag(int32, delay_tablet_export_metadata_ms, 0,
 DEFINE_test_flag(double, delay_create_snapshot_probability, 0.0,
     "The probability to delay creating snapshot by 1 second");
 
-DEFINE_test_flag(int32, delay_create_checkpoint_sec, 0,
-    "Sleep for this many seconds after acquiring checkpoint lock in CreateCheckpoint.");
+DEFINE_test_flag(bool, delay_create_checkpoint, false,
+    "If true, sleep in a loop after acquiring checkpoint lock in CreateCheckpoint, "
+    "waking up every 1s to check if the flag has been reset.");
 
 namespace yb::tablet {
 
@@ -711,10 +712,12 @@ Status TabletSnapshots::CreateCheckpoint(
                           Format("Unable to create checkpoints directory $0", parent_dir));
 
     // Test hook: sleep after acquiring lock to simulate long-running checkpoint operation.
-    if (PREDICT_FALSE(FLAGS_TEST_delay_create_checkpoint_sec > 0)) {
-      LOG(INFO) << "TEST: Create checkpoint sleeping for "
-        << FLAGS_TEST_delay_create_checkpoint_sec << " seconds";
-      SleepFor(MonoDelta::FromSeconds(FLAGS_TEST_delay_create_checkpoint_sec));
+    // Sleeps in 1s intervals, checking the flag each time before sleeping again.
+    if (PREDICT_FALSE(FLAGS_TEST_delay_create_checkpoint)) {
+      LOG(INFO) << "TEST: Create checkpoint sleeping";
+      while (FLAGS_TEST_delay_create_checkpoint) {
+        SleepFor(MonoDelta::FromSeconds(1));
+      }
       LOG(INFO) << "TEST: Create checkpoint done sleeping";
     }
 

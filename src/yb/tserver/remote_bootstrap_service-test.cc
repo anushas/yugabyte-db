@@ -72,7 +72,7 @@ DECLARE_uint64(remote_bootstrap_timeout_poll_period_ms);
 DECLARE_int32(remote_bootstrap_begin_session_timeout_ms);
 DECLARE_int32(rbs_init_max_number_of_retries);
 
-DECLARE_int32(TEST_delay_create_checkpoint_sec);
+DECLARE_bool(TEST_delay_create_checkpoint);
 
 namespace yb {
 namespace tserver {
@@ -417,16 +417,7 @@ TEST_F(RemoteBootstrapServiceTest, TestSessionTimeout) {
 // 2. Client times out on first RPC
 // 3. Second RPC is sent, uses try_lock, fails to acquire mutex, returns error
 TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
-  const auto kDelayCreateCheckpointSec = 5;
-  // Set test flag to sleep for 5 seconds after acquiring checkpoint lock.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = kDelayCreateCheckpointSec;
-
-  LOG(INFO) << "Test configuration: remote_bootstrap_begin_session_timeout_ms="
-            << FLAGS_remote_bootstrap_begin_session_timeout_ms
-            << ", rbs_init_max_number_of_retries="
-            << FLAGS_rbs_init_max_number_of_retries
-            << ", TEST_delay_create_checkpoint_sec="
-            << FLAGS_TEST_delay_create_checkpoint_sec;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint) = true;
 
   // Create two sessions that will try to acquire the lock.
   auto session1 = make_scoped_refptr<RemoteBootstrapSession>(
@@ -435,7 +426,7 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
       tablet_peer_, "TestSession2", "FakeUUID2", /*nsessions=*/nullptr);
 
   // Set up log waiter to detect when first session acquires the lock and starts sleeping.
-  StringWaiterLogSink log_waiter("TEST: Create checkpoint sleeping for");
+  StringWaiterLogSink log_waiter("TEST: Create checkpoint sleeping");
 
   // Start first session in a thread - it will acquire the lock and sleep.
   auto* first_session_ptr = session1.get();
@@ -444,7 +435,7 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
   });
 
   // Wait for first session to acquire the lock and start sleeping.
-  ASSERT_OK(log_waiter.WaitFor(MonoDelta::FromSeconds(2 * kDelayCreateCheckpointSec)));
+  ASSERT_OK(log_waiter.WaitFor(MonoDelta::FromSeconds(10)));
 
   // Now try to start a second session - it should fail to acquire the lock with try_lock.
   Status second_session_status = session2->InitBootstrapSession();
@@ -455,7 +446,8 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
   ASSERT_STR_CONTAINS(second_session_status.ToString(),
       "Unable to acquire checkpoint lock");
 
-  // Wait for first session to complete and verify it succeeded.
+  // Release the lock and wait for first session to complete.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint) = false;
   Status first_session_status = first_session_future.get();
   ASSERT_OK(first_session_status);
 }
@@ -464,27 +456,17 @@ TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
 // a subsequent BeginRemoteBootstrapSession RPC call fails to acquire the lock.
 // This tests the RPC-level behavior when checkpoint lock contention occurs.
 TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
-  const auto kDelayCreateCheckpointSec = 5;
-  // Set test flag to sleep for 5 seconds after acquiring checkpoint lock.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = kDelayCreateCheckpointSec;
-
-  LOG(INFO) << "Test configuration: remote_bootstrap_begin_session_timeout_ms="
-            << FLAGS_remote_bootstrap_begin_session_timeout_ms
-            << ", rbs_init_max_number_of_retries="
-            << FLAGS_rbs_init_max_number_of_retries
-            << ", TEST_delay_create_checkpoint_sec="
-            << FLAGS_TEST_delay_create_checkpoint_sec;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint) = true;
 
   // Set up log waiter to detect when first RPC acquires the lock and starts sleeping.
-  StringWaiterLogSink log_waiter("TEST: Create checkpoint sleeping for");
+  StringWaiterLogSink log_waiter("TEST: Create checkpoint sleeping");
 
   // Start first RPC call in a separate thread - it will acquire the lock and sleep.
   // Use a longer timeout so the RPC doesn't timeout before the sleep completes.
   auto first_rpc_future = std::async(std::launch::async, [this]() {
     BeginRemoteBootstrapSessionResponsePB resp;
     RpcController controller;
-    // Use a longer timeout (15 seconds) to allow the sleep to complete.
-    controller.set_timeout(MonoDelta::FromSeconds(3 * kDelayCreateCheckpointSec));
+    controller.set_timeout(MonoDelta::FromSeconds(30));
     BeginRemoteBootstrapSessionRequestPB req;
     req.set_tablet_id(GetTabletId());
     req.set_requestor_uuid(GetLocalUUID());
@@ -493,7 +475,7 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
   });
 
   // Wait for first RPC to acquire the lock and start sleeping.
-  ASSERT_OK(log_waiter.WaitFor(MonoDelta::FromSeconds(2 * kDelayCreateCheckpointSec)));
+  ASSERT_OK(log_waiter.WaitFor(MonoDelta::FromSeconds(10)));
 
   // Now try to make a second RPC call - it should fail to acquire the lock with try_lock.
   BeginRemoteBootstrapSessionResponsePB resp;
@@ -508,7 +490,8 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
   ASSERT_STR_CONTAINS(second_rpc_status.ToString(),
                       "Unable to acquire checkpoint lock");
 
-  // Wait for first RPC to complete and verify it succeeded.
+  // Release the lock and wait for first RPC to complete.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint) = false;
   Status first_rpc_status = first_rpc_future.get();
   ASSERT_OK(first_rpc_status);
 }
@@ -522,64 +505,44 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
 //    if sleep of step 1 is still in progress (lock is still held).
 // 4. Once the sleep of step 1 completes, the second RPC should succeed.
 TEST_F(RemoteBootstrapServiceTest, TestBeginRBSRPCTimeoutWithCheckpointLock) {
-  // Set test flag to sleep for 10 seconds after acquiring checkpoint lock.
-  // This is longer than the 5 seconds RPC timeout used in DoBeginRemoteBootstrapSession.
-  auto kDelayCreateCheckpointSec = 10;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = kDelayCreateCheckpointSec;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint) = true;
 
-  LOG(INFO) << "Test configuration: remote_bootstrap_begin_session_timeout_ms="
-            << FLAGS_remote_bootstrap_begin_session_timeout_ms
-            << ", rbs_init_max_number_of_retries="
-            << FLAGS_rbs_init_max_number_of_retries
-            << ", TEST_delay_create_checkpoint_sec="
-            << FLAGS_TEST_delay_create_checkpoint_sec
-            << ", RPC timeout in DoBeginRemoteBootstrapSession=1.0 seconds";
+  const auto kRPCTimeoutSec = 5;
 
-  // Start first RPC call - it will acquire the lock and sleep for 10 seconds,
+  // Start first RPC call - it will acquire the lock and sleep indefinitely,
   // but the RPC timeout is 5 seconds, so it should timeout.
   BeginRemoteBootstrapSessionResponsePB resp;
   RpcController controller;
-  controller.set_timeout(MonoDelta::FromSeconds(kDelayCreateCheckpointSec / 2));
-  auto first_rpc_start_time = MonoTime::Now();
+  controller.set_timeout(MonoDelta::FromSeconds(kRPCTimeoutSec));
   Status first_rpc_status = DoBeginRemoteBootstrapSession(
       GetTabletId(), GetLocalUUID(), &resp, &controller);
 
   // Verify the first RPC timed out.
-  // The status should be TimedOut or RemoteError with timeout information.
   LOG(INFO) << "First RPC status: " << first_rpc_status.ToString();
   ASSERT_TRUE(first_rpc_status.IsTimedOut() || first_rpc_status.IsRemoteError())
       << "Expected TimedOut or RemoteError status, got: " << first_rpc_status;
   ASSERT_STR_CONTAINS(first_rpc_status.ToString(), "Timed out");
 
-  // Reset the test flag so rest of the RPCs are regular (no sleep).
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint_sec) = 0;
-
-  // Now try to make a second RPC call - it should either succeed (if lock was released)
-  // or fail to acquire the lock (if lock is still held).
-  // Since the first RPC timed out on the client side, the server-side operation
-  // may have completed or may still be running.
+  // The server-side thread is still holding the lock. A second RPC should fail with contention.
   BeginRemoteBootstrapSessionResponsePB resp2;
   RpcController controller2;
   Status second_rpc_status = DoBeginRemoteBootstrapSession(
       GetTabletId(), GetLocalUUID(), &resp2, &controller2);
 
   LOG(INFO) << "Second RPC status after first RPC timed out: " << second_rpc_status.ToString();
-  if (first_rpc_start_time.GetDeltaSince(MonoTime::Now()).ToSeconds() < kDelayCreateCheckpointSec) {
-    ASSERT_TRUE(second_rpc_status.IsRemoteError())
-        << "Expected RemoteError, got: " << second_rpc_status;
-    ASSERT_STR_CONTAINS(second_rpc_status.ToString(), "Internal error");
-    ASSERT_STR_CONTAINS(second_rpc_status.ToString(), "Unable to acquire checkpoint lock");
-  } else {
-    ASSERT_OK(second_rpc_status);
-  }
+  ASSERT_TRUE(second_rpc_status.IsRemoteError())
+      << "Expected RemoteError, got: " << second_rpc_status;
+  ASSERT_STR_CONTAINS(second_rpc_status.ToString(), "Internal error");
+  ASSERT_STR_CONTAINS(second_rpc_status.ToString(), "Unable to acquire checkpoint lock");
 
-  // Even though the client timed out, the RPC processing on the
-  // server side is still asleep and holding the lock.
-  // Wait to ensure it wakes up and completes the checkpoint
-  // releasing the lock.
-  SleepFor(MonoDelta::FromSeconds(kDelayCreateCheckpointSec));
+  // Release the lock so the server-side thread completes.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint) = false;
 
-  // Now the next RPC should succeed.
+  // Wait for the server-side thread to finish and release the lock.
+  StringWaiterLogSink log_waiter("TEST: Create checkpoint done sleeping");
+  ASSERT_OK(log_waiter.WaitFor(MonoDelta::FromSeconds(10)));
+
+  // Now a third RPC should succeed.
   BeginRemoteBootstrapSessionResponsePB resp3;
   RpcController controller3;
   Status third_rpc_status = DoBeginRemoteBootstrapSession(

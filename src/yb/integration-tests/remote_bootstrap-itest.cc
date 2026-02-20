@@ -276,9 +276,6 @@ class RemoteBootstrapITest : public CreateTableITestBase {
   Result<TabletWorkloadInfo> PopulateTabletAndGetTabletId(
       int num_rows = 5000, size_t payload_bytes = 1024, MonoDelta timeout = 40s);
 
-  // Delete all SST files from a tablet's RocksDB directory to trigger remote bootstrap.
-  // This will cause the tablet to be marked as FAILED when it's bootstrapped.
-  Status DeleteTabletSSTFiles(const TabletId& tablet_id, TServerDetails* ts);
 
   MonoDelta crash_test_timeout_ = MonoDelta::FromSeconds(40);
   const MonoDelta kWaitForCrashTimeout_ = 60s;
@@ -1822,20 +1819,19 @@ TEST_F(RemoteBootstrapITest, TestFailedTabletIsRemoteBootstrapped) {
 // Without fix, this would create multiple stuck RBS RPC threads on the leader tserver.
 // With fix, this will create at most 2 RBS RPC threads on the leader tserver.
 TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
-  const auto kDelayRemovingPeerSecs = 10;
   const auto kRBSSessionTimeoutMs = 5000;
-  const auto kDelayCreateCheckpointSecs = 10;
 
   std::vector<std::string> ts_flags = {
       "--follower_unavailable_considered_failed_sec=30",
       "--raft_heartbeat_interval_ms=50",
       "--consensus_rpc_timeout_ms=300",
-      Format("--TEST_delay_removing_peer_with_failed_tablet_secs=$0", kDelayRemovingPeerSecs),
       "--memstore_size_mb=1",
       // Increase the number of missed heartbeats used to detect leader failure since in slow
       // testing instances it is very easy to miss the default (6) heartbeats since they are being
       // sent very fast (50ms).
       "--leader_failure_max_missed_heartbeat_periods=40.0",
+      // to make test deterministic, remote bootstrap from leader only
+      "--remote_bootstrap_from_leader_only=true",
       Format("--remote_bootstrap_begin_session_timeout_ms=$0", kRBSSessionTimeoutMs),
   };
 
@@ -1844,68 +1840,67 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   const size_t kNumTabletServers = 3;
   ASSERT_NO_FATALS(StartCluster(ts_flags, master_flags, kNumTabletServers));
 
-  const auto kTimeout = 40s;  // Increased timeout to account for multiple retry attempts
+  const auto kTimeout = 40s;
   ASSERT_OK(cluster_->WaitForTabletServerCount(kNumTabletServers, kTimeout));
 
-  // Populate a tablet with some data and get its tablet_id and workload info.
   auto tablet_workload_info = ASSERT_RESULT(PopulateTabletAndGetTabletId());
   auto tablet_id = tablet_workload_info.tablet_id;
 
   TServerDetails* leader_ts;
-  // Find out who's leader.
   ASSERT_OK(FindTabletLeader(ts_map_, tablet_id, kTimeout, &leader_ts));
 
   TServerDetails* follower_ts = nullptr;
+  size_t follower_index = 0;
   // Find the first follower TS.
   for (size_t i = 0; i < kNumTabletServers; i++) {
     if (cluster_->tablet_server(i)->uuid() != leader_ts->uuid()) {
       follower_ts = ts_map_[cluster_->tablet_server(i)->uuid()].get();
+      follower_index = i;
       break;
     }
   }
-
   ASSERT_ONLY_NOTNULL(follower_ts);
+  auto* follower_tserver = cluster_->tablet_server_by_uuid(follower_ts->uuid());
 
   ASSERT_OK(WaitUntilTabletInState(follower_ts, tablet_id, tablet::RUNNING, kTimeout));
 
-  // Shutdown the tserver before deleting SST files to avoid a race with concurrent compactions.
-  // They may change the state of persistence, and deletion could hit "Not found" error.
-  auto* follower_tserver = cluster_->tablet_server_by_uuid(follower_ts->uuid());
-  follower_tserver->Shutdown();
-
-  // Delete SST files to trigger remote bootstrap.
-  ASSERT_OK(DeleteTabletSSTFiles(tablet_id, follower_ts));
-
-  // Restart the tserver so that the tablet gets marked as FAILED when it's bootstrapped.
-  // Flag TEST_delay_removing_peer_with_failed_tablet_secs will keep the tablet in the FAILED state
-  // for the specified amount of time so that we can verify that it was indeed marked as FAILED.
-  ASSERT_OK(follower_tserver->Restart());
-
   // Set the checkpoint sleep flag on the leader tserver (which will be the source of remote
-  // bootstrap) to cause the checkpoint creation to sleep for 10 seconds, which is longer than
-  // the RPC timeout (5 seconds default), causing:
+  // bootstrap) to cause the checkpoint creation to sleep indefinitely (until flag is reset),
+  // which is longer than the RPC timeout (5 seconds), causing:
   // 1. First RPC to timeout on the client side
-  // 2. Subsequent RPCs to fail with checkpoint lock contention
-  // 3. Eventually the first RPC's server-side operation completes and releases the lock
-  // 4. The tablet is remote bootstrapped and becomes RUNNING again.
+  // 2. Subsequent RPCs to fail with checkpoint lock contention (until lock is released)
   //
+  // When the flag is reset, the first RPC's server-side operation completes and releases the lock.
+  // The tablet is successfully remote bootstrapped and becomes RUNNING again.
   // NOTE: today we allow the server-side to complete even if the client times out.
   // It not clear how idempotent and safe it is to do so and if there is a guarantee
   // that the checkpoint lock will be released eventually.
   // In this test scenario, its a happy path and we can verify it does.
   // This may change in future.
   auto* leader_tserver = ASSERT_NOTNULL(cluster_->tablet_server_by_uuid(leader_ts->uuid()));
-  ASSERT_OK(cluster_->SetFlag(leader_tserver, "TEST_delay_create_checkpoint_sec",
-      Format("$0", kDelayCreateCheckpointSecs)));
+  ASSERT_OK(cluster_->SetFlag(leader_tserver, "TEST_delay_create_checkpoint", "true"));
 
-  ASSERT_OK(WaitUntilTabletInState(follower_ts, tablet_id, tablet::FAILED, kTimeout, 500ms));
-  LOG(INFO) << "Tablet " << tablet_id << " in state FAILED in tablet server "
-            << follower_ts->uuid();
+  // Setup the log waiters to detect the following events:
+  // 1. on the leader, when the first RPC acquires the checkpoint lock and sleeps.
+  // 2. on the follower, when the first RPC times out.
+  LogWaiter checkpoint_log_waiter(leader_tserver, "TEST: Create checkpoint sleeping");
+  LogWaiter rpc_timeout_log_waiter(follower_tserver, "Start remote bootstrap failed: Timed out");
+
+  auto initial_num_rbs_sessions = GetNumRBSessions(leader_tserver);
+  auto initial_rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
+  LOG(INFO) << "RBS sessions on leader (initial): " << initial_num_rbs_sessions
+            << " rpc_inbound_calls_alive: " << initial_rpc_inbound_calls_alive;
+
+  // Remove the follower from the Raft config and wait for the master to tombstone it.
+  // Adding it back to the config to trigger the remote bootstrap from the leader.
+  ASSERT_OK(itest::RemoveServer(leader_ts, tablet_id, follower_ts, std::nullopt, kTimeout));
+  ASSERT_OK(inspect_->WaitForTabletDataStateOnTS(
+      follower_index, tablet_id, TABLET_DATA_TOMBSTONED, kTimeout));
+  ASSERT_OK(itest::AddServer(
+      leader_ts, tablet_id, follower_ts, PeerMemberType::PRE_VOTER, std::nullopt, kTimeout));
 
   // Wait for the first RPC to start and acquire the checkpoint lock on the leader.
-  LogWaiter checkpoint_log_waiter(leader_tserver, "TEST: Create checkpoint sleeping for");
-  ASSERT_OK(checkpoint_log_waiter.WaitFor(
-      MonoDelta::FromSeconds(2 * kDelayCreateCheckpointSecs)));
+  ASSERT_OK(checkpoint_log_waiter.WaitFor(kTimeout));
   LOG(INFO) << "First RPC has acquired the checkpoint lock";
 
   // Check that we have 1 active RPC thread and 1 active RBS session.
@@ -1914,39 +1909,51 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   auto rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
   LOG(INFO) << "RBS sessions on leader (before timeout): " << num_rbs_sessions
             << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
-  ASSERT_EQ(num_rbs_sessions, 1);
-  ASSERT_EQ(rpc_inbound_calls_alive, 1);
+  ASSERT_EQ(num_rbs_sessions, initial_num_rbs_sessions + 1);
+  // There could be other inflight RPCs on the leader, so not exact match.
+  ASSERT_GE(rpc_inbound_calls_alive, initial_rpc_inbound_calls_alive + 1);
+
+  // There should be no timeout yet on the follower.
+  ASSERT_FALSE(rpc_timeout_log_waiter.IsEventOccurred());
 
   // Wait for the first RPC to timeout on the follower, triggering a second attempt.
-  LogWaiter rpc_timeout_log_waiter(follower_tserver, "Start remote bootstrap failed: Timed out");
   ASSERT_OK(rpc_timeout_log_waiter.WaitFor(
-      MonoDelta::FromMilliseconds(kRBSSessionTimeoutMs * 1.2)));
+      MonoDelta::FromMilliseconds(kRBSSessionTimeoutMs * 1.5)));
   LOG(INFO) << "First RPC has timed out on the follower";
 
   // After the timeout, the first RPC's client side has timed out, but the server-side
   // thread is still active holding the checkpoint lock. Another attempt would be made,
   // which will start another thread, but it will finish quickly with failure. This will
-  // repeat until the lock is released.
-  // We should have at most 2 sessions at any given time during this period.
-  num_rbs_sessions = GetNumRBSessions(leader_tserver);
+  // repeat until the lock is released. There will be at most 2 RPC threads doing RBS.
+
+  // Should see multiple contention errors in the log. Let's wait for at least 5 of them.
+  int contention_errors = 0;
+  int kMinExpectedContentionErrors = 5;
+  do {
+    LogWaiter tmp_log_waiter(follower_tserver, "Unable to acquire checkpoint lock");
+    ASSERT_OK(tmp_log_waiter.WaitFor(
+        MonoDelta::FromMilliseconds(100)));
+    contention_errors++;
+  } while (contention_errors < kMinExpectedContentionErrors);
+
   rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
+  auto prev_num_rbs_sessions = num_rbs_sessions;
+  num_rbs_sessions = GetNumRBSessions(leader_tserver);
   LOG(INFO) << "RBS sessions on leader (after timeout): " << num_rbs_sessions
             << " rpc_inbound_calls_alive: " << rpc_inbound_calls_alive;
-  ASSERT_LE(rpc_inbound_calls_alive, 2);
-  ASSERT_GE(num_rbs_sessions, 2);
+  ASSERT_GE(num_rbs_sessions, prev_num_rbs_sessions + contention_errors);
+  // We should have at most 2 RPC threads doing RBS at any given time during this period.
+  // But with other inflight RPCs on the leader, and the current metric not differentiating
+  // between RBS and other RPCs, it may not be reliable to assert for that. Hence, a more relaxed
+  // assertion that the number of RPC threads is strictly less than the number of RBS sessions.
+  // Without fix, this would not hold true (it would be at least equal to the number of RBS sessions
+  // as each of them would be stuck waiting for the lock.).
+  ASSERT_LT(rpc_inbound_calls_alive, num_rbs_sessions);
 
-  // Wait a bit more and verify it never exceeds 2 until the lock is released.
-  auto remainingTime = (kDelayCreateCheckpointSecs * 1000 - kRBSSessionTimeoutMs);
-  SleepFor(MonoDelta::FromMilliseconds(remainingTime / 2));
-  num_rbs_sessions = GetNumRBSessions(leader_tserver);
-  rpc_inbound_calls_alive = GetRPCInboundCallsAlive(leader_tserver);
-  LOG(INFO) << "RBS sessions on leader (after additional " << remainingTime / 2 << "ms wait): "
-            << num_rbs_sessions << " rpc threads: " << rpc_inbound_calls_alive;
-  ASSERT_LE(rpc_inbound_calls_alive, 2);
-  ASSERT_GE(num_rbs_sessions, 2);
-
-  // Reset the test flag so rest of the RPCs are regular (no sleep).
-  ASSERT_OK(cluster_->SetFlag(leader_tserver, "TEST_delay_create_checkpoint_sec", "0"));
+  // Reset the flag to release the checkpoint lock so the RBS can complete.
+  ASSERT_OK(cluster_->SetFlag(leader_tserver, "TEST_delay_create_checkpoint", "false"));
+  // Set up a log waiter to detect when the first (timed out) RBS session expires.
+  LogWaiter session_expired_waiter(leader_tserver, "has expired. Terminating session");
 
   ASSERT_OK(WaitUntilTabletInState(follower_ts, tablet_id, tablet::RUNNING, kTimeout * 2));
 
@@ -1959,6 +1966,11 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   ASSERT_NO_FATALS(cluster_verifier.CheckCluster());
   ASSERT_NO_FATALS(cluster_verifier.CheckRowCount(tablet_workload_info.table_name,
       ClusterVerifier::AT_LEAST, tablet_workload_info.rows_inserted));
+
+  // The first (timed out) RBS session's checkpoint may be around until expiry cleans it up.
+  // For this test (RBS idle timeout=10s, poll period=10s), worst case ~20s to expiry. But
+  // CheckCheckpointsCleared() waits only up to 10s, so teardowncan fail. Hence, the wait here.
+  ASSERT_OK(session_expired_waiter.WaitFor(kTimeout));
 }
 
 TEST_F(RemoteBootstrapITest, TestRemoteBootstrapFromClosestPeer) {
@@ -2637,19 +2649,6 @@ Result<RemoteBootstrapITest::TabletWorkloadInfo> RemoteBootstrapITest::PopulateT
   info.batches_completed = workload.batches_completed();
   info.rows_inserted = workload.rows_inserted();
   return info;
-}
-
-Status RemoteBootstrapITest::DeleteTabletSSTFiles(
-    const std::string& tablet_id, TServerDetails* ts) {
-  auto* env = Env::Default();
-  auto ts_index = cluster_->tablet_server_index_by_uuid(ts->uuid());
-  auto sst_files = VERIFY_RESULT(inspect_->ListTabletSstFilesOnTS(ts_index, tablet_id));
-  SCHECK_GT(sst_files.size(), 0, IllegalState, "No SST files found for tablet");
-  for (const auto& file : sst_files) {
-    RETURN_NOT_OK(env->DeleteFile(file));
-    LOG(INFO) << "Deleted file " << file;
-  }
-  return Status::OK();
 }
 
 Result<std::string> RemoteBootstrapITest::SetUp3TabletServerClusterAndTable(

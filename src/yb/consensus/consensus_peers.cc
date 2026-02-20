@@ -595,8 +595,6 @@ void Peer::ProcessRemoteBootstrapResponse() {
   if (!status.ok()) {
     YB_LOG_WITH_PREFIX_EVERY_N_SECS(WARNING, 30)
         << "Unable to begin remote bootstrap on peer: " << status;
-    // TODO: for failure due to checkpoint lock contention,
-    // should we delay the retry.
     return;
   }
 

@@ -417,7 +417,7 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSCheckpointLockContention) {
   ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint) = true;
 
   // Set up log waiter to detect when first RPC acquires the lock and starts sleeping.
-  StringWaiterLogSink log_waiter("TEST: Create checkpoint sleeping");
+  StringWaiterLogSink log_waiter("Pausing due to flag TEST_delay_create_checkpoint");
 
   // Start first RPC call in a separate thread - it will acquire the lock and sleep.
   // Use a longer timeout so the RPC doesn't timeout before the sleep completes.
@@ -493,11 +493,11 @@ TEST_F(RemoteBootstrapServiceTest, TestBeginRBSRPCTimeoutWithCheckpointLock) {
   ASSERT_STR_CONTAINS(second_rpc_status.ToString(), "Internal error");
   ASSERT_STR_CONTAINS(second_rpc_status.ToString(), "Unable to acquire checkpoint lock");
 
-  // Release the lock so the server-side thread completes.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint) = false;
+  // Set up a log waiter to detect when the checkpoint is created (=> lock released).
+  StringWaiterLogSink log_waiter("Checkpoint created in");
 
-  // Wait for the server-side thread to finish and release the lock.
-  StringWaiterLogSink log_waiter("TEST: Create checkpoint done sleeping");
+  // Reset the flag to unblock the server-side thread and let it create the checkpoint.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint) = false;
   ASSERT_OK(log_waiter.WaitFor(MonoDelta::FromSeconds(10)));
 
   // Now a third RPC should succeed.

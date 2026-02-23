@@ -1812,12 +1812,12 @@ TEST_F(RemoteBootstrapITest, TestFailedTabletIsRemoteBootstrapped) {
                                                   workload.rows_inserted()));
 }
 
-// Test that when a tablet is marked as failed and triggers remote bootstrap,
-// and if the checkpoint creation takes longer than the RPC timeout, multiple
+// Test that when a remote bootstrap is initiated on a tablet, and if
+// the checkpoint creation takes longer than the RPC timeout, multiple
 // bootstrap attempts will be made (first one times out, others will error
 // with checkpoint lock contention, eventually first one finishes).
-// Without fix, this would create multiple stuck RBS RPC threads on the leader tserver.
-// With fix, this will create at most 2 RBS RPC threads on the leader tserver.
+// Without fix, this would create multiple stuck RBS RPC threads on the RBS source tserver.
+// With fix, this will create at most 2 RBS RPC threads on the RBS source tserver.
 TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   const auto kRBSSessionTimeoutMs = 5000;
 
@@ -1883,7 +1883,8 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   // Setup the log waiters to detect the following events:
   // 1. on the leader, when the first RPC acquires the checkpoint lock and sleeps.
   // 2. on the follower, when the first RPC times out.
-  LogWaiter checkpoint_log_waiter(leader_tserver, "TEST: Create checkpoint sleeping");
+  LogWaiter checkpoint_log_waiter(leader_tserver,
+      "Pausing due to flag TEST_delay_create_checkpoint");
   LogWaiter rpc_timeout_log_waiter(follower_tserver, "Start remote bootstrap failed: Timed out");
 
   auto initial_num_rbs_sessions = GetNumRBSessions(leader_tserver);

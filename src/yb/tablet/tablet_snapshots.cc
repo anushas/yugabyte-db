@@ -71,8 +71,8 @@ DEFINE_test_flag(double, delay_create_snapshot_probability, 0.0,
     "The probability to delay creating snapshot by 1 second");
 
 DEFINE_test_flag(bool, delay_create_checkpoint, false,
-    "If true, sleep in a loop after acquiring checkpoint lock in CreateCheckpoint, "
-    "waking up every 1s to check if the flag has been reset.");
+    "If true, pause after acquiring checkpoint lock in CreateCheckpoint "
+    "until the flag is reset.");
 
 namespace yb::tablet {
 
@@ -711,15 +711,7 @@ Status TabletSnapshots::CreateCheckpoint(
     RETURN_NOT_OK_PREPEND(metadata().fs_manager()->CreateDirIfMissing(parent_dir),
                           Format("Unable to create checkpoints directory $0", parent_dir));
 
-    // Test hook: sleep after acquiring lock to simulate long-running checkpoint operation.
-    // Sleeps in 1s intervals, checking the flag each time before sleeping again.
-    if (PREDICT_FALSE(FLAGS_TEST_delay_create_checkpoint)) {
-      LOG(INFO) << "TEST: Create checkpoint sleeping";
-      while (FLAGS_TEST_delay_create_checkpoint) {
-        SleepFor(MonoDelta::FromSeconds(1));
-      }
-      LOG(INFO) << "TEST: Create checkpoint done sleeping";
-    }
+    TEST_PAUSE_IF_FLAG(TEST_delay_create_checkpoint);
 
     // Order does not matter because we flush both DBs and does not have parallel writes.
     status = DoCreateCheckpoint(dir, create_checkpoint_in);

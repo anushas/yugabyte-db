@@ -410,48 +410,6 @@ TEST_F(RemoteBootstrapServiceTest, TestSessionTimeout) {
   ASSERT_FALSE(resp.session_is_active()) << "Remote bootstrap session did not time out!";
 }
 
-// Test that when a remote bootstrap session holds the checkpoint lock (via blocking lock),
-// a subsequent remote bootstrap session using try_lock fails to acquire the lock and returns
-// and error. This simulates the scenario where:
-// 1. First RPC acquires checkpoint lock and takes a long time (sleeps)
-// 2. Client times out on first RPC
-// 3. Second RPC is sent, uses try_lock, fails to acquire mutex, returns error
-TEST_F(RemoteBootstrapServiceTest, TestCheckpointLockTimeout) {
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint) = true;
-
-  // Create two sessions that will try to acquire the lock.
-  auto session1 = make_scoped_refptr<RemoteBootstrapSession>(
-      tablet_peer_, "TestSession1", "FakeUUID1", /*nsessions=*/nullptr);
-  auto session2 = make_scoped_refptr<RemoteBootstrapSession>(
-      tablet_peer_, "TestSession2", "FakeUUID2", /*nsessions=*/nullptr);
-
-  // Set up log waiter to detect when first session acquires the lock and starts sleeping.
-  StringWaiterLogSink log_waiter("TEST: Create checkpoint sleeping");
-
-  // Start first session in a thread - it will acquire the lock and sleep.
-  auto* first_session_ptr = session1.get();
-  auto first_session_future = std::async(std::launch::async, [first_session_ptr]() {
-    return first_session_ptr->InitBootstrapSession();
-  });
-
-  // Wait for first session to acquire the lock and start sleeping.
-  ASSERT_OK(log_waiter.WaitFor(MonoDelta::FromSeconds(10)));
-
-  // Now try to start a second session - it should fail to acquire the lock with try_lock.
-  Status second_session_status = session2->InitBootstrapSession();
-
-  // Verify the second session failed with InternalError status.
-  ASSERT_TRUE(second_session_status.IsInternalError())
-      << "Expected InternalError status, got: " << second_session_status;
-  ASSERT_STR_CONTAINS(second_session_status.ToString(),
-      "Unable to acquire checkpoint lock");
-
-  // Release the lock and wait for first session to complete.
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_create_checkpoint) = false;
-  Status first_session_status = first_session_future.get();
-  ASSERT_OK(first_session_status);
-}
-
 // Test that when a BeginRemoteBootstrapSession RPC holds the checkpoint lock,
 // a subsequent BeginRemoteBootstrapSession RPC call fails to acquire the lock.
 // This tests the RPC-level behavior when checkpoint lock contention occurs.

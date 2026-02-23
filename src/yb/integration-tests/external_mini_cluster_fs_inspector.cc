@@ -160,16 +160,6 @@ Result<vector<string>> ExternalMiniClusterFsInspector::ListTableSstFilesOnTS(
   return sst_files;
 }
 
-Result<vector<string>> ExternalMiniClusterFsInspector::ListTabletSstFilesOnTS(
-    size_t index, const TabletId& tablet_id) {
-  RaftGroupReplicaSuperBlockPB superblock;
-  RETURN_NOT_OK(ReadTabletSuperBlockOnTS(index, tablet_id, &superblock));
-  auto rocksdb_dir = superblock.kv_store().rocksdb_dir();
-  auto files = VERIFY_RESULT(RecursivelyListFilesInDir(rocksdb_dir));
-  vector<string> sst_files;
-  FilterSstFiles(files, sst_files);
-  return sst_files;
-}
 
 Result<vector<string>> ExternalMiniClusterFsInspector::RecursivelyListFilesInDir(
   const string& path) {

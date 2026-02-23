@@ -85,7 +85,6 @@ class ExternalMiniClusterFsInspector {
     std::function<void (const std::string&, const std::string&)> handler);
   Result<std::vector<std::string>> ListTableWalFilesOnTS(size_t index, const TableId& table_id);
   Result<std::vector<std::string>> ListTableSstFilesOnTS(size_t index, const TableId& table_id);
-  Result<std::vector<std::string>> ListTabletSstFilesOnTS(size_t index, const TabletId& tablet_id);
 
   // List all fs_data_roots with running tablets conut on the given tablet server index.
   std::unordered_map<std::string, std::vector<std::string>> DrivesOnTS(size_t index);

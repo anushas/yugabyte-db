@@ -71,16 +71,18 @@ using tablet::RaftGroupReplicaSuperBlockPB;
 
 namespace {
 
-void FilterSstFiles(const vector<string>& files, vector<string>& sst_files) {
+vector<string> FilterSstFiles(const vector<string>& files) {
+  vector<string> sst_files;
   for (const auto& file : files) {
     uint64_t number;
     rocksdb::FileType type;
-    std::string filename = std::filesystem::path(file).filename();
+    string filename = std::filesystem::path(file).filename();
     if (ParseFileName(filename, &number, &type) &&
         (type == rocksdb::kTableFile || type == rocksdb::kTableSBlockFile)) {
       sst_files.push_back(file);
     }
   }
+  return sst_files;
 }
 
 }  // namespace
@@ -152,8 +154,8 @@ Result<vector<string>> ExternalMiniClusterFsInspector::ListTableSstFilesOnTS(
         continue;
       }
       auto table_sst_dir = JoinPathSegments(ts_rocksdb_dir, table);
-      vector<string> files = VERIFY_RESULT(RecursivelyListFilesInDir(table_sst_dir));
-      FilterSstFiles(files, sst_files);
+      auto filtered = FilterSstFiles(VERIFY_RESULT(RecursivelyListFilesInDir(table_sst_dir)));
+      sst_files.insert(sst_files.end(), filtered.begin(), filtered.end());
       break;
     }
   }

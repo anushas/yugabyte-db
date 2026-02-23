@@ -1821,7 +1821,7 @@ TEST_F(RemoteBootstrapITest, TestFailedTabletIsRemoteBootstrapped) {
 TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   const auto kRBSSessionTimeoutMs = 5000;
 
-  std::vector<std::string> ts_flags = {
+  vector<string> ts_flags = {
       "--follower_unavailable_considered_failed_sec=30",
       "--raft_heartbeat_interval_ms=50",
       "--consensus_rpc_timeout_ms=300",
@@ -1835,7 +1835,7 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
       Format("--remote_bootstrap_begin_session_timeout_ms=$0", kRBSSessionTimeoutMs),
   };
 
-  std::vector<std::string> master_flags = {"--enable_load_balancing=true"};
+  vector<string> master_flags = {"--enable_load_balancing=true"};
 
   const size_t kNumTabletServers = 3;
   ASSERT_NO_FATALS(StartCluster(ts_flags, master_flags, kNumTabletServers));
@@ -1929,7 +1929,7 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
 
   // Should see multiple contention errors in the log. Let's wait for at least 5 of them.
   int contention_errors = 0;
-  int kMinExpectedContentionErrors = 5;
+  const int kMinExpectedContentionErrors = 5;
   do {
     LogWaiter tmp_log_waiter(follower_tserver, "Unable to acquire checkpoint lock");
     ASSERT_OK(tmp_log_waiter.WaitFor(

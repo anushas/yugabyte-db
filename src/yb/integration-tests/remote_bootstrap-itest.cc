@@ -1918,8 +1918,7 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   ASSERT_FALSE(rpc_timeout_log_waiter.IsEventOccurred());
 
   // Wait for the first RPC to timeout on the follower, triggering a second attempt.
-  ASSERT_OK(rpc_timeout_log_waiter.WaitFor(
-      MonoDelta::FromMilliseconds(kRBSSessionTimeoutMs * 1.5)));
+  ASSERT_OK(rpc_timeout_log_waiter.WaitFor(kTimeout));
   LOG(INFO) << "First RPC has timed out on the follower";
 
   // After the timeout, the first RPC's client side has timed out, but the server-side

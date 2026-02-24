@@ -1931,8 +1931,7 @@ TEST_F(RemoteBootstrapITest, TestRBSWithCheckpointLockContention) {
   const int kMinExpectedContentionErrors = 5;
   do {
     LogWaiter tmp_log_waiter(follower_tserver, "Unable to acquire checkpoint lock");
-    ASSERT_OK(tmp_log_waiter.WaitFor(
-        MonoDelta::FromMilliseconds(100)));
+    ASSERT_OK(tmp_log_waiter.WaitFor(kTimeout));
     contention_errors++;
   } while (contention_errors < kMinExpectedContentionErrors);
 
